@@ -58,6 +58,10 @@ type image struct {
 	meta io.ReaderAt
 }
 
+func (i *image) blkOffset() int64 {
+	return int64(i.sb.MetaBlkAddr) << int64(i.sb.BlkSizeBits)
+}
+
 func (i *image) dirEntry(nid uint64, name string) (uint64, fs.FileMode, error) {
 	return 0, 0, errors.New("direntry: not implemented")
 }
@@ -99,15 +103,14 @@ func (i *image) Open(name string) (fs.File, error) {
 			return nil, errors.New("not a directory")
 		}
 		dir := &dir{
-			base: base{
-				name:    basename,
-				blkAddr: i.sb.MetaBlkAddr,
-				blkSize: uint32(2 ^ i.sb.BlkSizeBits),
-				inode:   nid,
-				ftype:   ftype,
-				meta:    i.meta,
+			file: file{
+				img:   i,
+				name:  basename,
+				inode: nid,
+				ftype: ftype,
 			},
 		}
+		// TODO: Lookup in directory instead of reading all
 		entries, err := dir.ReadDir(-1)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read dir: %w", err)
@@ -115,8 +118,8 @@ func (i *image) Open(name string) (fs.File, error) {
 		var found bool
 		for _, e := range entries {
 			if e.Name() == basename {
-				nid = uint64(e.(*direntry).base.inode)
-				ftype = e.(*direntry).base.ftype & fs.ModeType
+				nid = uint64(e.(*direntry).file.inode)
+				ftype = e.(*direntry).file.ftype & fs.ModeType
 				found = true
 			}
 		}
@@ -129,33 +132,29 @@ func (i *image) Open(name string) (fs.File, error) {
 		basename = original
 	}
 
-	b := base{
-		name:    basename,
-		blkAddr: i.sb.MetaBlkAddr,
-		blkSize: uint32(2 ^ i.sb.BlkSizeBits),
-		inode:   nid,
-		ftype:   ftype,
-		meta:    i.meta,
+	b := file{
+		img:   i,
+		name:  basename,
+		inode: nid,
+		ftype: ftype,
 	}
 	if ftype.IsDir() {
-		return &dir{base: b}, nil
+		return &dir{file: b}, nil
 	}
 
 	return &b, nil
 }
 
-type base struct {
-	name    string
-	blkAddr uint32
-	blkSize uint32
-	inode   uint64
-	ftype   fs.FileMode
-	meta    io.ReaderAt
+type file struct {
+	img   *image
+	name  string
+	inode uint64
+	ftype fs.FileMode
 }
 
-func (b *base) readInfo() (*fileInfo, error) {
+func (b *file) readInfo() (*fileInfo, error) {
 	var ino [disk.SizeInodeExtended]byte
-	_, err := b.meta.ReadAt(ino[:], int64(b.blkAddr)*int64(b.blkSize)+int64(b.inode*disk.SizeInodeCompact))
+	_, err := b.img.meta.ReadAt(ino[:], b.img.blkOffset()+int64(b.inode*disk.SizeInodeCompact))
 	if err != nil {
 		return nil, err
 	}
@@ -227,20 +226,20 @@ func (b *base) readInfo() (*fileInfo, error) {
 	}
 }
 
-func (b *base) Stat() (fs.FileInfo, error) {
+func (b *file) Stat() (fs.FileInfo, error) {
 	return b.readInfo()
 }
 
-func (b *base) Read([]byte) (int, error) {
+func (b *file) Read([]byte) (int, error) {
 	return 0, errors.New("read: not implemented")
 }
-func (b *base) Close() error {
+func (b *file) Close() error {
 	// Nothing to close
 	return nil
 }
 
 type direntry struct {
-	base
+	file
 }
 
 func (d *direntry) Name() string {
@@ -260,7 +259,7 @@ func (d *direntry) Info() (fs.FileInfo, error) {
 }
 
 type dir struct {
-	base
+	file
 
 	offset int64
 	end    int64
@@ -281,7 +280,7 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 	// TODO: Need reader for different layouts
 
 	// inode loc + inode size + xattr size
-	start := int64(d.blkAddr)*int64(d.blkSize) + int64(d.inode*disk.SizeInodeCompact) + int64(fi.isize) + xattrSize
+	start := d.img.blkOffset() + int64(d.inode*disk.SizeInodeCompact) + int64(fi.isize) + xattrSize
 	end := start + fi.stat.Size
 
 	// TODO: Track position instead
@@ -296,7 +295,7 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		previous disk.Dirent
 	)
 	for (d.end == 0 || d.offset < d.end) && n != 0 {
-		readN, err := d.meta.ReadAt(direntB[:], d.offset)
+		readN, err := d.img.meta.ReadAt(direntB[:], d.offset)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read dirent: %w", err)
 		}
@@ -326,7 +325,7 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 			nameStart := start + int64(previous.NameOff)
 			nameLen := int(dirent.NameOff - previous.NameOff)
 			nameBuf := make([]byte, nameLen)
-			if n, err := d.meta.ReadAt(nameBuf, nameStart); err != nil {
+			if n, err := d.img.meta.ReadAt(nameBuf, nameStart); err != nil {
 				return nil, fmt.Errorf("failed to read at %d[%d]: %w", nameStart, nameLen, err)
 			} else if n != nameLen {
 				return nil, errors.New("could not read correct name length")
@@ -334,7 +333,7 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 
 			name := string(nameBuf)
 			if name != "." && name != ".." {
-				b := d.base
+				b := d.file
 				b.name = name
 				b.ftype = disk.EroFSFtypeToFileMode(previous.FileType)
 				b.inode = previous.Nid
@@ -351,7 +350,7 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		nameStart := start + int64(previous.NameOff)
 		nameLen := int(end - nameStart)
 		nameBuf := make([]byte, nameLen)
-		if n, err := d.meta.ReadAt(nameBuf, nameStart); err != nil {
+		if n, err := d.img.meta.ReadAt(nameBuf, nameStart); err != nil {
 			return nil, err
 		} else if n != nameLen {
 			return nil, errors.New("could not read correct name length")
@@ -359,7 +358,7 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 
 		name := string(nameBuf)
 		if name != "." && name != ".." {
-			b := d.base
+			b := d.file
 			b.name = name
 			b.ftype = disk.EroFSFtypeToFileMode(previous.FileType)
 			b.inode = previous.Nid
