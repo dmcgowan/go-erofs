@@ -249,6 +249,9 @@ type file struct {
 }
 
 func (b *file) readInfo() (*fileInfo, error) {
+	if b.info != nil {
+		return b.info, nil
+	}
 	var ino [disk.SizeInodeExtended]byte
 	_, err := b.img.meta.ReadAt(ino[:], b.img.blkOffset()+int64(b.inode*disk.SizeInodeCompact))
 	if err != nil {
@@ -266,7 +269,7 @@ func (b *file) readInfo() (*fileInfo, error) {
 		if _, err := binary.Decode(ino[:disk.SizeInodeCompact], binary.LittleEndian, &inode); err != nil {
 			return nil, err
 		}
-		return &fileInfo{
+		b.info = &fileInfo{
 			name:        b.name,
 			inode:       b.inode,
 			isize:       disk.SizeInodeCompact,
@@ -287,13 +290,13 @@ func (b *file) readInfo() (*fileInfo, error) {
 				//Mtime        uint64
 				//MtimeNs      uint32
 			},
-		}, nil
+		}
 	} else {
 		var inode disk.InodeExtended
 		if _, err := binary.Decode(ino[:disk.SizeInodeExtended], binary.LittleEndian, &inode); err != nil {
 			return nil, err
 		}
-		return &fileInfo{
+		b.info = &fileInfo{
 			name:        b.name,
 			inode:       b.inode,
 			isize:       disk.SizeInodeExtended,
@@ -313,16 +316,40 @@ func (b *file) readInfo() (*fileInfo, error) {
 				Mtime:        inode.Mtime,
 				MtimeNs:      inode.MtimeNs,
 			},
-		}, nil
+		}
 	}
+	return b.info, nil
 }
 
 func (b *file) Stat() (fs.FileInfo, error) {
 	return b.readInfo()
 }
 
-func (b *file) Read([]byte) (int, error) {
-	return 0, errors.New("read: not implemented")
+func (b *file) Read(p []byte) (int, error) {
+	fi, err := b.readInfo()
+	if err != nil {
+		return 0, err
+	}
+
+	var n int
+	for len(p) > 0 {
+		blk, err := b.img.loadBlock(fi, b.offset)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				err = io.EOF
+				b.offset += int64(n)
+			}
+			return n, err
+		}
+		buf := blk.bytes()
+		copied := copy(p, buf)
+		n += copied
+		p = p[copied:]
+		b.offset += int64(n)
+
+		b.img.putBlock(blk)
+	}
+	return n, nil
 }
 
 func (b *file) Close() error {
