@@ -8,13 +8,32 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/dmcgowan/go-erofs/internal/disk"
 )
 
+// Errors
+var (
+	// ErrInvalid occurs when an invalid value is detected in the erofs data.
+	// Whether this invalid data is the result of corruption or bad input
+	// is up to the caller to decide.
+	// This error may be wrapped with more details.
+	ErrInvalid = errors.New("invalid")
+
+	// ErrInvalidSuperblock occurs when the super block could not be validated
+	// when initially loading the erofs input. Unlike other corruption cases,
+	// invalid super block should be returned immediately
+	ErrInvalidSuperblock = fmt.Errorf("invalid super block: %w", ErrInvalid)
+
+	// ErrNotImplemented is returned when a feature is known but not implemented
+	// yet by this library
+	ErrNotImplemented = errors.New("not implemented")
+)
+
+// Stat is the erofs specific stat data returned by Stat and FileInfo requests
 type Stat struct {
-	InodeLayout  int8
 	XattrCount   int16
 	Mode         fs.FileMode
 	Size         int64
@@ -48,6 +67,15 @@ func EroFS(r io.ReaderAt) (fs.FS, error) {
 	if err = decodeSuperBlock(superBlock, &i.sb); err != nil {
 		return nil, err
 	}
+	// TODO: check valid
+	if i.sb.BlkSizeBits < 9 || i.sb.BlkSizeBits > 24 {
+		return nil, fmt.Errorf("invalid super block: block size bits %d", i.sb.BlkSizeBits)
+	}
+	i.blkPool.New = func() any {
+		return &block{
+			buf: make([]byte, 1<<i.sb.BlkSizeBits),
+		}
+	}
 
 	return &i, nil
 }
@@ -55,11 +83,73 @@ func EroFS(r io.ReaderAt) (fs.FS, error) {
 type image struct {
 	sb disk.SuperBlock
 
-	meta io.ReaderAt
+	meta    io.ReaderAt
+	blkPool sync.Pool
 }
 
-func (i *image) blkOffset() int64 {
-	return int64(i.sb.MetaBlkAddr) << int64(i.sb.BlkSizeBits)
+func (img *image) blkOffset() int64 {
+	return int64(img.sb.MetaBlkAddr) << int64(img.sb.BlkSizeBits)
+}
+
+// loadBlock loads the block with the given data
+func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
+	nblocks := calculateBlocks(img.sb.BlkSizeBits, fi.size)
+	bn := int(pos >> int(img.sb.BlkSizeBits))
+	if bn >= nblocks {
+		return nil, fmt.Errorf("block position larger than number of blocks for inode: %w", io.EOF)
+	}
+	posInBlk := int32(pos - int64(bn<<int(img.sb.BlkSizeBits)))
+	var addr int64
+	maxSize := int(1 << img.sb.BlkSizeBits)
+	expectedN := maxSize
+	switch fi.inodeLayout {
+	case disk.LayoutFlatPlain:
+		// flat plain has no holes
+		addr = int64(fi.stat.RawBlockAddr) + int64(bn>>int(img.sb.BlkSizeBits))
+		if bn == nblocks-1 {
+			maxSize = int(fi.size - int64(bn)*int64(1<<img.sb.BlkSizeBits))
+			expectedN = maxSize
+		}
+	case disk.LayoutFlatInline:
+		// If on the last block, validate
+		if bn == nblocks-1 {
+			addr = img.blkOffset() + int64(fi.inode*disk.SizeInodeCompact)
+			maxSize = int(fi.size - int64(bn*(1<<img.sb.BlkSizeBits)))
+
+			// Ensure the last block is not exceeded
+			offset := fi.lastBlockOffset()
+			space := int(1<<img.sb.BlkSizeBits - offset)
+			if maxSize > space {
+				return nil, fmt.Errorf("inline data cross block boundary for nid %d: %w", fi.inode, ErrNotImplemented)
+			}
+			posInBlk += int32(offset)
+			expectedN = maxSize + offset
+		} else {
+			addr = int64(fi.stat.RawBlockAddr) + int64(bn>>int(img.sb.BlkSizeBits))
+		}
+
+	case disk.LayoutChunkBased, disk.LayoutCompressedFull, disk.LayoutCompressedCompact:
+		return nil, fmt.Errorf("inode layout (%d) for %d: %w", fi.inodeLayout, fi.inode, ErrNotImplemented)
+	default:
+		return nil, fmt.Errorf("inode layout (%d) for %d: %w", fi.inodeLayout, fi.inode, ErrInvalid)
+	}
+
+	b := img.blkPool.Get().(*block)
+	if n, err := img.meta.ReadAt(b.buf[:expectedN], addr); err != nil {
+		return nil, fmt.Errorf("failed to read block for nid %d: %w", fi.inode, err)
+	} else if n != expectedN {
+		return nil, fmt.Errorf("failed to read full block for nid %d: %w", fi.inode, ErrInvalid)
+	}
+	b.offset = posInBlk
+	b.maxSize = int32(maxSize)
+
+	return b, nil
+}
+
+// putBlock returns a block after complete so its
+// buffer can be put back into the buffer pool
+func (img *image) putBlock(b *block) {
+	img.blkPool.Put(b)
 }
 
 func (i *image) dirEntry(nid uint64, name string) (uint64, fs.FileMode, error) {
@@ -164,28 +254,22 @@ func (b *file) readInfo() (*fileInfo, error) {
 		return nil, err
 	}
 
-	// Layout
-	// 0: Flat Plain
-	// 2: Flat Inline
-	// 4: Chunk based
 	layout := int8((format & 0x0E) >> 1)
-	if layout != 0 && layout != 2 {
-		return nil, fmt.Errorf("not supported layout, only flat supported: %d", layout)
-	}
 	if format&0x01 == 0 {
 		var inode disk.InodeCompact
 		if _, err := binary.Decode(ino[:disk.SizeInodeCompact], binary.LittleEndian, &inode); err != nil {
 			return nil, err
 		}
 		return &fileInfo{
-			name:  b.name,
-			isize: disk.SizeInodeCompact,
-			size:  int64(inode.Size),
-			mode:  (fs.FileMode(inode.Mode) & ^fs.ModeType) | b.ftype,
+			name:        b.name,
+			inode:       b.inode,
+			isize:       disk.SizeInodeCompact,
+			inodeLayout: layout,
+			size:        int64(inode.Size),
+			mode:        (fs.FileMode(inode.Mode) & ^fs.ModeType) | b.ftype,
 			//modTime: time.Unix(int64(inode.Mtime), int64(inode.MtimeNs)),
 			// TODO: Set mtime to zero value?
 			stat: &Stat{
-				InodeLayout:  layout,
 				XattrCount:   int16(inode.XattrCount),
 				Mode:         fs.FileMode(inode.Mode),
 				Size:         int64(inode.Size),
@@ -204,13 +288,14 @@ func (b *file) readInfo() (*fileInfo, error) {
 			return nil, err
 		}
 		return &fileInfo{
-			name:    b.name,
-			isize:   disk.SizeInodeExtended,
-			size:    int64(inode.Size),
-			mode:    (fs.FileMode(inode.Mode) & ^fs.ModeType) | b.ftype,
-			modTime: time.Unix(int64(inode.Mtime), int64(inode.MtimeNs)),
+			name:        b.name,
+			inode:       b.inode,
+			isize:       disk.SizeInodeExtended,
+			inodeLayout: layout,
+			size:        int64(inode.Size),
+			mode:        (fs.FileMode(inode.Mode) & ^fs.ModeType) | b.ftype,
+			modTime:     time.Unix(int64(inode.Mtime), int64(inode.MtimeNs)),
 			stat: &Stat{
-				InodeLayout:  layout,
 				XattrCount:   int16(inode.XattrCount),
 				Mode:         fs.FileMode(inode.Mode),
 				Size:         int64(inode.Size),
@@ -233,6 +318,7 @@ func (b *file) Stat() (fs.FileInfo, error) {
 func (b *file) Read([]byte) (int, error) {
 	return 0, errors.New("read: not implemented")
 }
+
 func (b *file) Close() error {
 	// Nothing to close
 	return nil
@@ -261,8 +347,11 @@ func (d *direntry) Info() (fs.FileInfo, error) {
 type dir struct {
 	file
 
-	offset int64
-	end    int64
+	//bn is the current block to read from (relative to file start)
+	bn int
+
+	//consumed is how many have been returned in the current block
+	consumed uint16
 }
 
 func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
@@ -270,39 +359,25 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("readInfo failed: %w", err)
 	}
-	var xattrSize int64
-	if fi.stat.XattrCount != 0 {
-		xattrSize = 12 + int64((fi.stat.XattrCount-1))*4
-	}
 
-	// TODO: Must handle case where directory is larger than block, then read from raw
-	// block address first, only last block is inline in most cases
-	// TODO: Need reader for different layouts
-
-	// inode loc + inode size + xattr size
-	start := d.img.blkOffset() + int64(d.inode*disk.SizeInodeCompact) + int64(fi.isize) + xattrSize
-	end := start + fi.stat.Size
-
-	// TODO: Track position instead
-	if d.offset == 0 {
-		d.offset = start
-	}
-
-	var (
-		ents     []fs.DirEntry
-		direntB  [disk.SizeDirent]byte
-		dirent   disk.Dirent
-		previous disk.Dirent
-	)
-	for (d.end == 0 || d.offset < d.end) && n != 0 {
-		readN, err := d.img.meta.ReadAt(direntB[:], d.offset)
+	var ents []fs.DirEntry
+	pos := int64(d.bn << d.img.sb.BlkSizeBits)
+	for pos < fi.size {
+		b, err := d.img.loadBlock(fi, pos)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read dirent: %w", err)
+			if errors.Is(err, io.EOF) {
+				return ents, nil
+			}
+			return nil, err
 		}
-		if readN != 12 {
-			return nil, errors.New("invalid dirent: short read")
+		buf := b.bytes()
+		if len(buf) < 12 {
+			return ents, nil
 		}
-		readN, err = binary.Decode(direntB[:], binary.LittleEndian, &dirent)
+
+		var dirents [2]disk.Dirent
+
+		readN, err := binary.Decode(buf[:12], binary.LittleEndian, &dirents[0])
 		if err != nil {
 			return nil, fmt.Errorf("decode failed: %w", err)
 		}
@@ -310,72 +385,65 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 			return nil, errors.New("invalid dirent: not fully decoded")
 		}
 
-		if d.end == 0 {
-			d.end = d.offset + int64(dirent.NameOff)
-		}
-		if ents == nil {
-			max := int(d.end-d.offset) / disk.SizeDirent
-			if n > 0 && max > n {
-				max = n
-			}
-			ents = make([]fs.DirEntry, 0, max)
-		}
+		entryN := dirents[0].NameOff / disk.SizeDirent
 
-		if previous.Nid != 0 {
-			nameStart := start + int64(previous.NameOff)
-			nameLen := int(dirent.NameOff - previous.NameOff)
-			nameBuf := make([]byte, nameLen)
-			if n, err := d.img.meta.ReadAt(nameBuf, nameStart); err != nil {
-				return nil, fmt.Errorf("failed to read at %d[%d]: %w", nameStart, nameLen, err)
-			} else if n != nameLen {
-				return nil, errors.New("could not read correct name length")
+		for i := uint16(0); i < entryN; i++ {
+			var name string
+			if i < entryN-1 {
+				start := 12 * (i + 1)
+				readN, err := binary.Decode(buf[start:start+12], binary.LittleEndian, &dirents[1])
+				if err != nil {
+					return nil, fmt.Errorf("decode failed: %w", err)
+				}
+				if readN != 12 {
+					return nil, errors.New("invalid dirent: not fully decoded")
+				}
+				name = string(buf[dirents[0].NameOff:dirents[1].NameOff])
+			} else {
+				name = string(buf[dirents[0].NameOff:])
 			}
 
-			name := string(nameBuf)
-			if name != "." && name != ".." {
-				b := d.file
-				b.name = name
-				b.ftype = disk.EroFSFtypeToFileMode(previous.FileType)
-				b.inode = previous.Nid
+			if i >= d.consumed && name != "." && name != ".." {
+				b := file{
+					img:   d.file.img,
+					name:  name,
+					inode: dirents[0].Nid,
+					ftype: disk.EroFSFtypeToFileMode(dirents[0].FileType),
+				}
 				ents = append(ents, &direntry{b})
+				d.consumed = i + 1
+
+				if n > 0 && len(ents) == n {
+					if i == entryN-1 {
+						d.consumed = 0
+						d.bn++
+					}
+					return ents, nil
+				}
 			}
-		}
-		if n > 0 {
-			n--
-		}
-		d.offset += disk.SizeDirent
-		previous = dirent
-	}
-	if previous.Nid != 0 {
-		nameStart := start + int64(previous.NameOff)
-		nameLen := int(end - nameStart)
-		nameBuf := make([]byte, nameLen)
-		if n, err := d.img.meta.ReadAt(nameBuf, nameStart); err != nil {
-			return nil, err
-		} else if n != nameLen {
-			return nil, errors.New("could not read correct name length")
+
+			// Rotate next to current
+			dirents[0] = dirents[1]
 		}
 
-		name := string(nameBuf)
-		if name != "." && name != ".." {
-			b := d.file
-			b.name = name
-			b.ftype = disk.EroFSFtypeToFileMode(previous.FileType)
-			b.inode = previous.Nid
-			ents = append(ents, &direntry{b})
-		}
+		d.consumed = 0
+		d.bn++
+		pos = int64(d.bn << d.img.sb.BlkSizeBits)
 	}
 
 	return ents, nil
 }
 
 type fileInfo struct {
-	name    string
-	isize   int8
-	size    int64
-	mode    fs.FileMode
-	modTime time.Time
-	stat    *Stat
+	name        string
+	inode       uint64
+	isize       int8
+	inodeLayout int8
+	size        int64
+	mode        fs.FileMode
+	modTime     time.Time
+	stat        *Stat
+	// TODO: Cache block?
 }
 
 func (fi *fileInfo) Name() string {
@@ -402,6 +470,15 @@ func (fi *fileInfo) Sys() any {
 	return fi.stat
 }
 
+func (fi *fileInfo) lastBlockOffset() int {
+	var xattrSize int
+	if fi.stat.XattrCount != 0 {
+		xattrSize = 12 + int((fi.stat.XattrCount-1))*4
+	}
+
+	// inode size + xattr size
+	return int(fi.isize) + xattrSize
+}
 func decodeSuperBlock(b [disk.SizeSuperBlock]byte, sb *disk.SuperBlock) error {
 	n, err := binary.Decode(b[:], binary.LittleEndian, sb)
 	if err != nil {

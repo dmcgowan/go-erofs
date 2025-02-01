@@ -8,6 +8,12 @@ const (
 	SizeInodeCompact  = 32
 	SizeInodeExtended = 64
 	SizeDirent        = 12
+
+	LayoutFlatPlain         = 0
+	LayoutCompressedFull    = 1
+	LayoutFlatInline        = 2
+	LayoutCompressedCompact = 3
+	LayoutChunkBased        = 4
 )
 
 type SuperBlock struct {
