@@ -7,7 +7,7 @@ type block struct {
 }
 
 func (b *block) bytes() []byte {
-	if b.buf == nil || b.offset == -1 || b.offset >= b.maxSize {
+	if b.buf == nil || b.offset == -1 || int(b.offset+b.maxSize) > len(b.buf) {
 		return nil
 	}
 	return b.buf[b.offset : b.offset+b.maxSize]

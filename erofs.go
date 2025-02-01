@@ -174,6 +174,7 @@ func (i *image) Open(name string) (fs.File, error) {
 	nid := uint64(i.sb.RootNid)
 	ftype := fs.ModeDir
 
+	parent := "/"
 	basename := name
 	for name != "" {
 		var sep int
@@ -195,7 +196,7 @@ func (i *image) Open(name string) (fs.File, error) {
 		dir := &dir{
 			file: file{
 				img:   i,
-				name:  basename,
+				name:  parent,
 				inode: nid,
 				ftype: ftype,
 			},
@@ -216,6 +217,7 @@ func (i *image) Open(name string) (fs.File, error) {
 		if !found {
 			return nil, errors.New("directory not found")
 		}
+		parent = basename
 	}
 
 	if basename == "" {
@@ -240,6 +242,10 @@ type file struct {
 	name  string
 	inode uint64
 	ftype fs.FileMode
+
+	// Mutable fields, open file should not be accessed concurrently
+	offset int64     // current offset for read operations
+	info   *fileInfo // cached fileInfo
 }
 
 func (b *file) readInfo() (*fileInfo, error) {
