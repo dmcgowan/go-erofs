@@ -20,7 +20,7 @@ var (
 	// Whether this invalid data is the result of corruption or bad input
 	// is up to the caller to decide.
 	// This error may be wrapped with more details.
-	ErrInvalid = errors.New("invalid")
+	ErrInvalid = fs.ErrInvalid
 
 	// ErrInvalidSuperblock occurs when the super block could not be validated
 	// when initially loading the erofs input. Unlike other corruption cases,
@@ -98,14 +98,14 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 	if bn >= nblocks {
 		return nil, fmt.Errorf("block position larger than number of blocks for inode: %w", io.EOF)
 	}
-	posInBlk := int32(pos - int64(bn<<int(img.sb.BlkSizeBits)))
+	posInBlk := int(pos - int64(bn<<int(img.sb.BlkSizeBits)))
 	var addr int64
 	maxSize := int(1 << img.sb.BlkSizeBits)
 	expectedN := maxSize
 	switch fi.inodeLayout {
 	case disk.LayoutFlatPlain:
 		// flat plain has no holes
-		addr = int64(fi.stat.RawBlockAddr) + int64(bn>>int(img.sb.BlkSizeBits))
+		addr = int64(int(fi.stat.RawBlockAddr)+bn) << img.sb.BlkSizeBits
 		if bn == nblocks-1 {
 			maxSize = int(fi.size - int64(bn)*int64(1<<img.sb.BlkSizeBits))
 			expectedN = maxSize
@@ -114,24 +114,26 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 		// If on the last block, validate
 		if bn == nblocks-1 {
 			addr = img.blkOffset() + int64(fi.inode*disk.SizeInodeCompact)
-			maxSize = int(fi.size - int64(bn*(1<<img.sb.BlkSizeBits)))
 
 			// Ensure the last block is not exceeded
 			offset := fi.lastBlockOffset()
-			space := int(1<<img.sb.BlkSizeBits - offset)
-			if maxSize > space {
+			maxSize = int(fi.size-int64(bn*(1<<img.sb.BlkSizeBits))) + offset
+			if maxSize > int(1<<img.sb.BlkSizeBits) {
 				return nil, fmt.Errorf("inline data cross block boundary for nid %d: %w", fi.inode, ErrNotImplemented)
 			}
-			posInBlk += int32(offset)
+			posInBlk += offset
 			expectedN = maxSize + offset
 		} else {
-			addr = int64(fi.stat.RawBlockAddr) + int64(bn>>int(img.sb.BlkSizeBits))
+			addr = int64(int(fi.stat.RawBlockAddr)+bn) << img.sb.BlkSizeBits
 		}
 
 	case disk.LayoutChunkBased, disk.LayoutCompressedFull, disk.LayoutCompressedCompact:
 		return nil, fmt.Errorf("inode layout (%d) for %d: %w", fi.inodeLayout, fi.inode, ErrNotImplemented)
 	default:
 		return nil, fmt.Errorf("inode layout (%d) for %d: %w", fi.inodeLayout, fi.inode, ErrInvalid)
+	}
+	if maxSize == posInBlk {
+		return nil, fmt.Errorf("no remaining items in block: %w", io.EOF)
 	}
 
 	b := img.blkPool.Get().(*block)
@@ -140,7 +142,7 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 	} else if n != expectedN {
 		return nil, fmt.Errorf("failed to read full block for nid %d: %w", fi.inode, ErrInvalid)
 	}
-	b.offset = posInBlk
+	b.offset = int32(posInBlk)
 	b.maxSize = int32(maxSize)
 
 	return b, nil
@@ -215,7 +217,7 @@ func (i *image) Open(name string) (fs.File, error) {
 			}
 		}
 		if !found {
-			return nil, errors.New("directory not found")
+			return nil, fmt.Errorf("%s not found: %w", original, fs.ErrNotExist)
 		}
 		parent = basename
 	}
@@ -333,6 +335,9 @@ func (b *file) Read(p []byte) (int, error) {
 
 	var n int
 	for len(p) > 0 {
+		if b.offset >= fi.size {
+			return n, io.EOF
+		}
 		blk, err := b.img.loadBlock(fi, b.offset)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -345,7 +350,7 @@ func (b *file) Read(p []byte) (int, error) {
 		copied := copy(p, buf)
 		n += copied
 		p = p[copied:]
-		b.offset += int64(n)
+		b.offset += int64(copied)
 
 		b.img.putBlock(blk)
 	}
