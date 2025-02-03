@@ -17,3 +17,38 @@ could provide an interface to create erofs files as well.
 - [ ] Read erofs files with compression
 - [ ] Extra devices for chunked data
 - [ ] Creating erofs files
+
+## Example use
+
+Print out all the files in an erofs file
+
+```
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"log"
+	"os"
+
+	"github.com/dmcgowan/go-erofs"
+)
+
+func main() {
+	f, err := os.Open("testdata/basic-default.erofs")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+
+	img, err := erofs.EroFS(f)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fs.WalkDir(img, "/", func(path string, entry fs.DirEntry, err error) error {
+		fmt.Println(path)
+		return nil
+	})
+}
+```
