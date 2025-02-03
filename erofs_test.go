@@ -10,26 +10,35 @@ import (
 )
 
 func TestBasic(t *testing.T) {
-	fs, err := EroFS(loadTestFile(t, "basic"))
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	checkFileString(t, fs, "/in-root.txt", "root file content\n")
-	checkFileString(t, fs, "/usr/lib/testdir/emptyfile", "")
-	checkFileBytes(t, fs, "/usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13))
-	checkFileBytes(t, fs, "/usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16))
-	checkFileBytes(t, fs, "/usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5))
-	checkFileBytes(t, fs, "/usr/lib/testdir/16k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16))
-	checkDirectorySize(t, fs, "/usr/lib/testdir/emptydir", 0)
-	checkDirectorySize(t, fs, "/usr/lib/testdir/lotsoffiles", 5000)
-	checkNotExists(t, fs, "/not-exists.txt")
-	checkNotExists(t, fs, "/not-exists/somefile")
-	checkNotExists(t, fs, "/usr/lib/testdir/emptydir/somefile")
-	checkFileString(t, fs, "/usr/lib/testdir/case/file.txt", "lower case dir\n")
-	checkFileString(t, fs, "/usr/lib/testdir/CASE/file.txt", "upper case dir\n")
-	checkFileString(t, fs, "/usr/lib/testdir/case.txt", "lower case file\n")
-	checkFileString(t, fs, "/usr/lib/testdir/CASE.txt", "upper case file\n")
+	for _, name := range []string{
+		"default",
+		// TODO: Add chunk layout
+		// TODO: Add compressed layout
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs, err := EroFS(loadTestFile(t, "basic-"+name))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			checkFileString(t, fs, "/in-root.txt", "root file content\n")
+			checkFileString(t, fs, "/usr/lib/testdir/emptyfile", "")
+			checkFileBytes(t, fs, "/usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13))
+			checkFileBytes(t, fs, "/usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16))
+			checkFileBytes(t, fs, "/usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5))
+			checkFileBytes(t, fs, "/usr/lib/testdir/16k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16))
+			checkDirectorySize(t, fs, "/usr/lib/testdir/emptydir", 0)
+			checkDirectorySize(t, fs, "/usr/lib/testdir/lotsoffiles", 5000)
+			checkNotExists(t, fs, "/not-exists.txt")
+			checkNotExists(t, fs, "/not-exists/somefile")
+			checkNotExists(t, fs, "/usr/lib/testdir/emptydir/somefile")
+			checkFileString(t, fs, "/usr/lib/testdir/case/file.txt", "lower case dir\n")
+			checkFileString(t, fs, "/usr/lib/testdir/CASE/file.txt", "upper case dir\n")
+			checkFileString(t, fs, "/usr/lib/testdir/case.txt", "lower case file\n")
+			checkFileString(t, fs, "/usr/lib/testdir/CASE.txt", "upper case file\n")
+		})
+	}
 }
 
 func loadTestFile(t testing.TB, name string) io.ReaderAt {
