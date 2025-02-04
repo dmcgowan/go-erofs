@@ -34,16 +34,18 @@ var (
 
 // Stat is the erofs specific stat data returned by Stat and FileInfo requests
 type Stat struct {
-	XattrCount   int16
-	Mode         fs.FileMode
-	Size         int64
-	RawBlockAddr int32
-	Inode        int64
-	UID          uint32
-	GID          uint32
-	Mtime        uint64
-	MtimeNs      uint32
-	Nlink        int
+	XattrCount  int16
+	Mode        fs.FileMode
+	Size        int64
+	InodeLayout uint8
+	InodeData   uint32
+	Inode       int64
+	UID         uint32
+	GID         uint32
+	Mtime       uint64
+	MtimeNs     uint32
+	Nlink       int
+	// TODO: Include xattrs
 }
 
 // EroFS returns a FileSystem reading from the given readerat.
@@ -106,7 +108,7 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 	switch fi.inodeLayout {
 	case disk.LayoutFlatPlain:
 		// flat plain has no holes
-		addr = int64(int(fi.stat.RawBlockAddr)+bn) << img.sb.BlkSizeBits
+		addr = int64(int(fi.stat.InodeData)+bn) << img.sb.BlkSizeBits
 		if bn == nblocks-1 {
 			maxSize = int(fi.size - int64(bn)*int64(1<<img.sb.BlkSizeBits))
 			expectedN = maxSize
@@ -128,10 +130,29 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 			posInBlk += offset
 			expectedN = maxSize + offset
 		} else {
-			addr = int64(int(fi.stat.RawBlockAddr)+bn) << img.sb.BlkSizeBits
+			addr = int64(int(fi.stat.InodeData)+bn) << img.sb.BlkSizeBits
 		}
 
-	case disk.LayoutChunkBased, disk.LayoutCompressedFull, disk.LayoutCompressedCompact:
+	case disk.LayoutChunkBased:
+		// /* indicate chunk blkbits, thus 'chunksize = blocksize << chunk blkbits' */
+		// #define EROFS_CHUNK_FORMAT_BLKBITS_MASK		0x001F
+		// /* with chunk indexes or just a 4-byte blkaddr array */
+		// #define EROFS_CHUNK_FORMAT_INDEXES		0x0020
+		//
+		// #define EROFS_CHUNK_FORMAT_ALL	\
+		// 	(EROFS_CHUNK_FORMAT_BLKBITS_MASK | EROFS_CHUNK_FORMAT_INDEXES)
+		//
+		// /* 32-byte on-disk inode */
+		// #define EROFS_INODE_LAYOUT_COMPACT	0
+		// /* 64-byte on-disk inode */
+		// #define EROFS_INODE_LAYOUT_EXTENDED	1
+		//
+		//struct erofs_inode_chunk_info {
+		//	__le16 format;		/* chunk blkbits, etc. */
+		//	__le16 reserved;
+		//};
+		return nil, fmt.Errorf("inode layout (%d) for %d: %w", fi.inodeLayout, fi.inode, ErrNotImplemented)
+	case disk.LayoutCompressedFull, disk.LayoutCompressedCompact:
 		return nil, fmt.Errorf("inode layout (%d) for %d: %w", fi.inodeLayout, fi.inode, ErrNotImplemented)
 	default:
 		return nil, fmt.Errorf("inode layout (%d) for %d: %w", fi.inodeLayout, fi.inode, ErrInvalid)
@@ -269,7 +290,7 @@ func (b *file) readInfo() (*fileInfo, error) {
 		return nil, err
 	}
 
-	layout := int8((format & 0x0E) >> 1)
+	layout := uint8((format & 0x0E) >> 1)
 	if format&0x01 == 0 {
 		var inode disk.InodeCompact
 		if _, err := binary.Decode(ino[:disk.SizeInodeCompact], binary.LittleEndian, &inode); err != nil {
@@ -285,14 +306,15 @@ func (b *file) readInfo() (*fileInfo, error) {
 			//modTime: time.Unix(int64(inode.Mtime), int64(inode.MtimeNs)),
 			// TODO: Set mtime to zero value?
 			stat: &Stat{
-				XattrCount:   int16(inode.XattrCount),
-				Mode:         fs.FileMode(inode.Mode),
-				Size:         int64(inode.Size),
-				RawBlockAddr: inode.RawBlockAddr,
-				Inode:        int64(inode.Inode),
-				UID:          uint32(inode.UID),
-				GID:          uint32(inode.GID),
-				Nlink:        int(inode.Nlink),
+				XattrCount:  int16(inode.XattrCount),
+				Mode:        fs.FileMode(inode.Mode),
+				Size:        int64(inode.Size),
+				InodeLayout: layout,
+				InodeData:   inode.InodeData,
+				Inode:       int64(inode.Inode),
+				UID:         uint32(inode.UID),
+				GID:         uint32(inode.GID),
+				Nlink:       int(inode.Nlink),
 				//Mtime        uint64
 				//MtimeNs      uint32
 			},
@@ -311,16 +333,17 @@ func (b *file) readInfo() (*fileInfo, error) {
 			mode:        (fs.FileMode(inode.Mode) & ^fs.ModeType) | b.ftype,
 			modTime:     time.Unix(int64(inode.Mtime), int64(inode.MtimeNs)),
 			stat: &Stat{
-				XattrCount:   int16(inode.XattrCount),
-				Mode:         fs.FileMode(inode.Mode),
-				Size:         int64(inode.Size),
-				RawBlockAddr: inode.RawBlockAddr,
-				Inode:        int64(inode.Inode),
-				UID:          uint32(inode.UID),
-				GID:          uint32(inode.GID),
-				Nlink:        int(inode.Nlink),
-				Mtime:        inode.Mtime,
-				MtimeNs:      inode.MtimeNs,
+				XattrCount:  int16(inode.XattrCount),
+				Mode:        fs.FileMode(inode.Mode),
+				Size:        int64(inode.Size),
+				InodeLayout: layout,
+				InodeData:   inode.InodeData,
+				Inode:       int64(inode.Inode),
+				UID:         uint32(inode.UID),
+				GID:         uint32(inode.GID),
+				Nlink:       int(inode.Nlink),
+				Mtime:       inode.Mtime,
+				MtimeNs:     inode.MtimeNs,
 			},
 		}
 	}
@@ -480,7 +503,7 @@ type fileInfo struct {
 	name        string
 	inode       uint64
 	isize       int8
-	inodeLayout int8
+	inodeLayout uint8
 	size        int64
 	mode        fs.FileMode
 	modTime     time.Time

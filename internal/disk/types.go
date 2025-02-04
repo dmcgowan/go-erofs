@@ -50,7 +50,7 @@ type InodeCompact struct {
 	Nlink        uint16
 	Size         uint32
 	Reserved     uint32
-	RawBlockAddr int32
+	InodeData    uint32
 	RawBlockSize uint16
 	Inode        uint32
 	UID          uint16
@@ -59,19 +59,19 @@ type InodeCompact struct {
 }
 
 type InodeExtended struct {
-	Format       uint16
-	XattrCount   uint16
-	Mode         uint16
-	Reserved     uint16
-	Size         uint64
-	RawBlockAddr int32
-	Inode        uint32
-	UID          uint32
-	GID          uint32
-	Mtime        uint64
-	MtimeNs      uint32
-	Nlink        uint32
-	Reserved2    [16]uint8
+	Format     uint16
+	XattrCount uint16
+	Mode       uint16
+	Reserved   uint16
+	Size       uint64
+	InodeData  uint32 // RawBlockAddr | Rdev | Compressed Count | Chunk Format
+	Inode      uint32
+	UID        uint32
+	GID        uint32
+	Mtime      uint64
+	MtimeNs    uint32
+	Nlink      uint32
+	Reserved2  [16]uint8
 }
 
 type Dirent struct {
