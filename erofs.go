@@ -100,75 +100,69 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 	if bn >= nblocks {
 		return nil, fmt.Errorf("block position larger than number of blocks for inode: %w", io.EOF)
 	}
-	posInBlk := int(pos - int64(bn<<int(img.sb.BlkSizeBits)))
 	var addr int64
 	blockSize := int(1 << img.sb.BlkSizeBits)
-	maxSize := blockSize
-	expectedN := maxSize
+	blockOffset := 0
+	blockEnd := blockSize
 	switch fi.inodeLayout {
 	case disk.LayoutFlatPlain:
 		// flat plain has no holes
 		addr = int64(int(fi.stat.InodeData)+bn) << img.sb.BlkSizeBits
 		if bn == nblocks-1 {
-			maxSize = int(fi.size - int64(bn)*int64(1<<img.sb.BlkSizeBits))
-			expectedN = maxSize
+			blockEnd = int(fi.size - int64(bn)*int64(1<<img.sb.BlkSizeBits))
 		}
 	case disk.LayoutFlatInline:
 		// If on the last block, validate
 		if bn == nblocks-1 {
 			addr = img.blkOffset() + int64(fi.inode*disk.SizeInodeCompact)
+			// Move to the data offset from the start of the inode
+			addr += fi.inodeInlineOffset()
+
+			// Get the ooffset from the start of the block
+			blockOffset = int(addr & int64(blockSize-1))
+			// Calculate end of block using data offset + tail data size
+			blockEnd = int(fi.size-int64(bn*blockSize)) + blockOffset
 
 			// Ensure the last block is not exceeded
-			// First get the offset from the start of the inode
-			offset := fi.inodeInlineOffset()
-			// Get the inode offset from the start of the block
-			inodeOffset := int(addr & int64(blockSize-1))
-			maxSize = int(fi.size-int64(bn*blockSize)) + offset
-			if inodeOffset+maxSize > blockSize {
+			if blockEnd > blockSize {
 				return nil, fmt.Errorf("inline data cross block boundary for nid %d: %w", fi.inode, ErrInvalid)
 			}
-			posInBlk += offset
-			expectedN = maxSize + offset
+			// Move the offset within the block based on position within file
+			blockOffset += int(pos - int64(bn<<int(img.sb.BlkSizeBits)))
 		} else {
 			addr = int64(int(fi.stat.InodeData)+bn) << img.sb.BlkSizeBits
 		}
-
 	case disk.LayoutChunkBased:
-		// /* indicate chunk blkbits, thus 'chunksize = blocksize << chunk blkbits' */
-		// #define EROFS_CHUNK_FORMAT_BLKBITS_MASK		0x001F
-		// /* with chunk indexes or just a 4-byte blkaddr array */
-		// #define EROFS_CHUNK_FORMAT_INDEXES		0x0020
-		//
-		// #define EROFS_CHUNK_FORMAT_ALL	\
-		// 	(EROFS_CHUNK_FORMAT_BLKBITS_MASK | EROFS_CHUNK_FORMAT_INDEXES)
-		//
-		// /* 32-byte on-disk inode */
-		// #define EROFS_INODE_LAYOUT_COMPACT	0
-		// /* 64-byte on-disk inode */
-		// #define EROFS_INODE_LAYOUT_EXTENDED	1
-		//
-		//struct erofs_inode_chunk_info {
-		//	__le16 format;		/* chunk blkbits, etc. */
-		//	__le16 reserved;
-		//};
-		return nil, fmt.Errorf("inode layout (%d) for %d: %w", fi.inodeLayout, fi.inode, ErrNotImplemented)
+		// first 2 le bytes for format, second 2 bytes are reserved
+		format := uint16(fi.stat.InodeData)
+		if format&^(disk.LayoutChunkFormatBits|disk.LayoutChunkFormatIndexes) != 0 {
+			return nil, fmt.Errorf("unsupported chunk format %x for nid %d: %w", format, fi.inode, ErrInvalid)
+		}
+		chunkbits := img.sb.BlkSizeBits + uint8(format&disk.LayoutChunkFormatBits)
+		chunkn := ((fi.size - 1) >> chunkbits) + 1
+		// chunkn is size / chunk size
+		// If index, then
+
+		// TODO: Cache chunk map?
+
+		return nil, fmt.Errorf("chunk layout with %d chunks of %d bits for %d: %w", chunkn, chunkbits, fi.inode, ErrNotImplemented)
 	case disk.LayoutCompressedFull, disk.LayoutCompressedCompact:
 		return nil, fmt.Errorf("inode layout (%d) for %d: %w", fi.inodeLayout, fi.inode, ErrNotImplemented)
 	default:
 		return nil, fmt.Errorf("inode layout (%d) for %d: %w", fi.inodeLayout, fi.inode, ErrInvalid)
 	}
-	if maxSize == posInBlk {
+	if blockOffset >= blockEnd {
 		return nil, fmt.Errorf("no remaining items in block: %w", io.EOF)
 	}
 
-	b := img.blkPool.Get().(*block)
-	if n, err := img.meta.ReadAt(b.buf[:expectedN], addr); err != nil {
+	b := img.getBlock()
+	if n, err := img.meta.ReadAt(b.buf[blockOffset:blockEnd], addr); err != nil {
 		return nil, fmt.Errorf("failed to read block for nid %d: %w", fi.inode, err)
-	} else if n != expectedN {
+	} else if n != (blockEnd - blockOffset) {
 		return nil, fmt.Errorf("failed to read full block for nid %d: %w", fi.inode, ErrInvalid)
 	}
-	b.offset = int32(posInBlk)
-	b.maxSize = int32(maxSize)
+	b.offset = int32(blockOffset)
+	b.maxSize = int32(blockEnd)
 
 	return b, nil
 }
@@ -535,14 +529,14 @@ func (fi *fileInfo) Sys() any {
 	return fi.stat
 }
 
-func (fi *fileInfo) inodeInlineOffset() int {
-	var xattrSize int
+func (fi *fileInfo) inodeInlineOffset() int64 {
+	var xattrSize int64
 	if fi.stat.XattrCount != 0 {
-		xattrSize = 12 + int((fi.stat.XattrCount-1))*4
+		xattrSize = 12 + int64((fi.stat.XattrCount-1))*4
 	}
 
 	// inode size + xattr size
-	return int(fi.isize) + xattrSize
+	return int64(fi.isize) + xattrSize
 }
 func decodeSuperBlock(b [disk.SizeSuperBlock]byte, sb *disk.SuperBlock) error {
 	n, err := binary.Decode(b[:], binary.LittleEndian, sb)
