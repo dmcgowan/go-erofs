@@ -162,7 +162,7 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 		return nil, fmt.Errorf("failed to read full block for nid %d: %w", fi.inode, ErrInvalid)
 	}
 	b.offset = int32(blockOffset)
-	b.maxSize = int32(blockEnd)
+	b.end = int32(blockEnd)
 
 	return b, nil
 }

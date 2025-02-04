@@ -1,16 +1,16 @@
 package erofs
 
 type block struct {
-	buf     []byte
-	offset  int32
-	maxSize int32
+	buf    []byte
+	offset int32
+	end    int32
 }
 
 func (b *block) bytes() []byte {
 	if b.buf == nil || b.offset == -1 {
 		return nil
 	}
-	return b.buf[b.offset:b.maxSize]
+	return b.buf[b.offset:b.end]
 }
 
 func calculateBlocks(blockBits uint8, size int64) int {
