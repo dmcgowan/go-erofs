@@ -100,7 +100,8 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 	}
 	posInBlk := int(pos - int64(bn<<int(img.sb.BlkSizeBits)))
 	var addr int64
-	maxSize := int(1 << img.sb.BlkSizeBits)
+	blockSize := int(1 << img.sb.BlkSizeBits)
+	maxSize := blockSize
 	expectedN := maxSize
 	switch fi.inodeLayout {
 	case disk.LayoutFlatPlain:
@@ -116,10 +117,13 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 			addr = img.blkOffset() + int64(fi.inode*disk.SizeInodeCompact)
 
 			// Ensure the last block is not exceeded
-			offset := fi.lastBlockOffset()
-			maxSize = int(fi.size-int64(bn*(1<<img.sb.BlkSizeBits))) + offset
-			if maxSize > int(1<<img.sb.BlkSizeBits) {
-				return nil, fmt.Errorf("inline data cross block boundary for nid %d: %w", fi.inode, ErrNotImplemented)
+			// First get the offset from the start of the inode
+			offset := fi.inodeInlineOffset()
+			// Get the inode offset from the start of the block
+			inodeOffset := int(addr & int64(blockSize-1))
+			maxSize = int(fi.size-int64(bn*blockSize)) + offset
+			if inodeOffset+maxSize > blockSize {
+				return nil, fmt.Errorf("inline data cross block boundary for nid %d: %w", fi.inode, ErrInvalid)
 			}
 			posInBlk += offset
 			expectedN = maxSize + offset
@@ -508,7 +512,7 @@ func (fi *fileInfo) Sys() any {
 	return fi.stat
 }
 
-func (fi *fileInfo) lastBlockOffset() int {
+func (fi *fileInfo) inodeInlineOffset() int {
 	var xattrSize int
 	if fi.stat.XattrCount != 0 {
 		xattrSize = 12 + int((fi.stat.XattrCount-1))*4
