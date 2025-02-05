@@ -116,7 +116,7 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 		if bn == nblocks-1 {
 			addr = img.blkOffset() + int64(fi.inode*disk.SizeInodeCompact)
 			// Move to the data offset from the start of the inode
-			addr += fi.inodeInlineOffset()
+			addr += fi.dataOffset()
 
 			// Get the ooffset from the start of the block
 			blockOffset = int(addr & int64(blockSize-1))
@@ -138,14 +138,50 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 		if format&^(disk.LayoutChunkFormatBits|disk.LayoutChunkFormatIndexes) != 0 {
 			return nil, fmt.Errorf("unsupported chunk format %x for nid %d: %w", format, fi.inode, ErrInvalid)
 		}
+		if format&disk.LayoutChunkFormatIndexes == disk.LayoutChunkFormatIndexes {
+			return nil, fmt.Errorf("chunk format with indexes for nid %d: %w", fi.inode, ErrNotImplemented)
+		}
 		chunkbits := img.sb.BlkSizeBits + uint8(format&disk.LayoutChunkFormatBits)
-		chunkn := ((fi.size - 1) >> chunkbits) + 1
-		// chunkn is size / chunk size
-		// If index, then
+		chunkn := int((fi.size-1)>>chunkbits) + 1
+		cn := int(pos >> chunkbits)
 
-		// TODO: Cache chunk map?
+		if cn >= chunkn {
+			return nil, fmt.Errorf("chunk format does not fit into allocated bytes for nid %d: %w", fi.inode, ErrInvalid)
+		}
 
-		return nil, fmt.Errorf("chunk layout with %d chunks of %d bits for %d: %w", chunkn, chunkbits, fi.inode, ErrNotImplemented)
+		if fi.cached == nil {
+			// TODO: actually load it, why would it not be here though
+			return nil, errors.New("inode block not cached")
+		}
+		buf := fi.cached.bytes()
+		// TODO: Or support indexes
+		dataOffset := fi.dataOffset() + int64(cn*4)
+		if len(buf) < int(dataOffset)+4 {
+			return nil, fmt.Errorf("invalid chunk data for nid %d: %w", fi.inode, ErrInvalid)
+		}
+		var rawAddr int32
+		if _, err := binary.Decode(buf[dataOffset:dataOffset+4], binary.LittleEndian, &rawAddr); err != nil {
+			return nil, err
+		}
+
+		if bn == nblocks-1 {
+			blockEnd = int(fi.size - int64(bn)*int64(1<<img.sb.BlkSizeBits))
+		}
+
+		if rawAddr == -1 {
+			// Null address, return new zero filled block
+			return &block{
+				buf: make([]byte, 1<<img.sb.BlkSizeBits),
+				end: int32(blockEnd),
+			}, nil
+		}
+
+		// Add block offset within chunk
+		if pos > 0 {
+			rawAddr += int32((pos - int64(cn<<chunkbits)) >> img.sb.BlkSizeBits)
+		}
+
+		addr = int64(rawAddr) << int64(img.sb.BlkSizeBits)
 	case disk.LayoutCompressedFull, disk.LayoutCompressedCompact:
 		return nil, fmt.Errorf("inode layout (%d) for %d: %w", fi.inodeLayout, fi.inode, ErrNotImplemented)
 	default:
@@ -165,6 +201,10 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 	b.end = int32(blockEnd)
 
 	return b, nil
+}
+
+func (img *image) getBlock() *block {
+	return img.blkPool.Get().(*block)
 }
 
 // putBlock returns a block after complete so its
@@ -273,8 +313,14 @@ func (b *file) readInfo() (*fileInfo, error) {
 	if b.info != nil {
 		return b.info, nil
 	}
-	var ino [disk.SizeInodeExtended]byte
-	_, err := b.img.meta.ReadAt(ino[:], b.img.blkOffset()+int64(b.inode*disk.SizeInodeCompact))
+
+	addr := b.img.blkOffset() + int64(b.inode*disk.SizeInodeCompact)
+	blkSize := int32(1 << b.img.sb.BlkSizeBits)
+	blk := b.img.getBlock()
+	blk.offset = int32(addr & int64(blkSize-1))
+	blk.end = blkSize
+	ino := blk.bytes()
+	_, err := b.img.meta.ReadAt(ino, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +387,15 @@ func (b *file) readInfo() (*fileInfo, error) {
 			},
 		}
 	}
+
+	// TODO: Load xattrs into stat
+
+	if b.info.inodeLayout == disk.LayoutFlatPlain || b.info.size == 0 {
+		b.img.putBlock(blk)
+	} else {
+		// If the inode has trailing data used later, cache it
+		b.info.cached = blk
+	}
 	return b.info, nil
 }
 
@@ -379,7 +434,7 @@ func (b *file) Read(p []byte) (int, error) {
 }
 
 func (b *file) Close() error {
-	// Nothing to close
+	b.info.cached = nil
 	return nil
 }
 
@@ -502,7 +557,7 @@ type fileInfo struct {
 	mode        fs.FileMode
 	modTime     time.Time
 	stat        *Stat
-	// TODO: Cache block?
+	cached      *block
 }
 
 func (fi *fileInfo) Name() string {
@@ -529,7 +584,7 @@ func (fi *fileInfo) Sys() any {
 	return fi.stat
 }
 
-func (fi *fileInfo) inodeInlineOffset() int64 {
+func (fi *fileInfo) dataOffset() int64 {
 	var xattrSize int64
 	if fi.stat.XattrCount != 0 {
 		xattrSize = 12 + int64((fi.stat.XattrCount-1))*4

@@ -14,6 +14,9 @@ const (
 	LayoutFlatInline        = 2
 	LayoutCompressedCompact = 3
 	LayoutChunkBased        = 4
+
+	LayoutChunkFormatBits    = 0x001F
+	LayoutChunkFormatIndexes = 0x0020
 )
 
 type SuperBlock struct {
