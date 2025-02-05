@@ -13,7 +13,8 @@ func TestBasic(t *testing.T) {
 
 	for _, name := range []string{
 		"default",
-		// TODO: Add chunk layout
+		"chunk-4096",
+		"chunk-8192",
 		// TODO: Add compressed layout
 	} {
 		t.Run(name, func(t *testing.T) {
