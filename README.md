@@ -12,10 +12,10 @@ could provide an interface to create erofs files as well.
 ## Current state
 
 - [x] Read erofs files created with default `mkfs.erofs` options
-- [ ] Xattr support (needs interface defined, currently not in Go stdlib)
-- [ ] Read chunk-based erofs files
+- [x] Read chunk-based erofs files (without indexes)
+- [ ] Xattr support
 - [ ] Read erofs files with compression
-- [ ] Extra devices for chunked data
+- [ ] Extra devices for chunked data and chunk indexes
 - [ ] Creating erofs files
 
 ## Example use
