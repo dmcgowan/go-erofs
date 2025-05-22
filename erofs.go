@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dmcgowan/go-erofs/internal/disk"
+	"github.com/erofs/go-erofs/internal/disk"
 )
 
 // Errors

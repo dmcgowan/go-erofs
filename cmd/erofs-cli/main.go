@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/dmcgowan/go-erofs"
+	"github.com/erofs/go-erofs"
 )
 
 func main() {
