@@ -309,7 +309,7 @@ type file struct {
 	info   *fileInfo // cached fileInfo
 }
 
-func (b *file) readInfo() (*fileInfo, error) {
+func (b *file) readInfo(infoOnly bool) (*fileInfo, error) {
 	if b.info != nil {
 		return b.info, nil
 	}
@@ -396,7 +396,7 @@ func (b *file) readInfo() (*fileInfo, error) {
 
 	// TODO: Load xattrs into stat
 
-	if b.info.inodeLayout == disk.LayoutFlatPlain || b.info.size == 0 || blk.end != blkSize {
+	if !infoOnly || b.info.inodeLayout == disk.LayoutFlatPlain || b.info.size == 0 || blk.end != blkSize {
 		b.img.putBlock(blk)
 	} else {
 		// If the inode has trailing data used later, cache it
@@ -406,11 +406,11 @@ func (b *file) readInfo() (*fileInfo, error) {
 }
 
 func (b *file) Stat() (fs.FileInfo, error) {
-	return b.readInfo()
+	return b.readInfo(true)
 }
 
 func (b *file) Read(p []byte) (int, error) {
-	fi, err := b.readInfo()
+	fi, err := b.readInfo(false)
 	if err != nil {
 		return 0, err
 	}
@@ -461,7 +461,7 @@ func (d *direntry) Type() fs.FileMode {
 }
 
 func (d *direntry) Info() (fs.FileInfo, error) {
-	return d.readInfo()
+	return d.readInfo(true)
 }
 
 type dir struct {
@@ -475,7 +475,7 @@ type dir struct {
 }
 
 func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
-	fi, err := d.readInfo()
+	fi, err := d.readInfo(false)
 	if err != nil {
 		return nil, fmt.Errorf("readInfo failed: %w", err)
 	}
