@@ -315,16 +315,17 @@ func (b *file) readInfo() (*fileInfo, error) {
 	}
 
 	addr := b.img.blkOffset() + int64(b.inode*disk.SizeInodeCompact)
-	blkSize := int32(1 << b.img.sb.BlkSizeBits)
 	blk := b.img.getBlock()
-	blk.offset = int32(addr & int64(blkSize-1))
-	blk.end = blkSize
+	// Use buffer starting from beginning of inode, do not use the position
+	// in the block since an extended inode may span multiple blocks
+	blk.offset = 0
+	blk.end = disk.SizeInodeExtended
 	ino := blk.bytes()
 	_, err := b.img.meta.ReadAt(ino, addr)
 	if err != nil {
 		return nil, err
 	}
-	// TODO: Check bytes read, force 32 read to be compact
+
 	var format uint16
 	if _, err := binary.Decode(ino[:2], binary.LittleEndian, &format); err != nil {
 		return nil, err
