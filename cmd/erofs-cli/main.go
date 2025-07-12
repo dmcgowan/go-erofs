@@ -31,10 +31,9 @@ func main() {
 
 	fmt.Printf("Found valid image...\n")
 
-	fs.WalkDir(img, "/", func(path string, entry fs.DirEntry, err error) error {
+	err = fs.WalkDir(img, "/", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			fmt.Printf("error visiting %s: %v", path, err)
-			return err
+			return fmt.Errorf("error visting %s: %w", path, err)
 		}
 		fmt.Printf("visited: %q\n", path)
 		fmt.Printf("\tName: %q\n", entry.Name())
@@ -46,7 +45,7 @@ func main() {
 		}
 		fi, err := entry.Info()
 		if err != nil {
-			return err
+			return fmt.Errorf("error getting info for %s: %w", path, err)
 		}
 		fmt.Printf("\tMode: %o\n", fi.Mode())
 		fmt.Printf("\tModTime: %s\n", fi.ModTime())
@@ -55,4 +54,7 @@ func main() {
 		}
 		return nil
 	})
+	if err != nil {
+		log.Fatal(err)
+	}
 }
