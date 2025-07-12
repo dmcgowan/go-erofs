@@ -315,11 +315,16 @@ func (b *file) readInfo() (*fileInfo, error) {
 	}
 
 	addr := b.img.blkOffset() + int64(b.inode*disk.SizeInodeCompact)
+	blkSize := int32(1 << b.img.sb.BlkSizeBits)
 	blk := b.img.getBlock()
-	// Use buffer starting from beginning of inode, do not use the position
-	// in the block since an extended inode may span multiple blocks
-	blk.offset = 0
-	blk.end = disk.SizeInodeExtended
+	blk.offset = int32(addr & int64(blkSize-1))
+	blk.end = blkSize
+	if blk.end-blk.offset < disk.SizeInodeExtended {
+		// Use buffer starting from beginning of inode, do not use the position
+		// in the block since an extended inode may span multiple blocks
+		blk.offset = 0
+		blk.end = disk.SizeInodeExtended
+	}
 	ino := blk.bytes()
 	_, err := b.img.meta.ReadAt(ino, addr)
 	if err != nil {
@@ -391,7 +396,7 @@ func (b *file) readInfo() (*fileInfo, error) {
 
 	// TODO: Load xattrs into stat
 
-	if b.info.inodeLayout == disk.LayoutFlatPlain || b.info.size == 0 {
+	if b.info.inodeLayout == disk.LayoutFlatPlain || b.info.size == 0 || blk.end != blkSize {
 		b.img.putBlock(blk)
 	} else {
 		// If the inode has trailing data used later, cache it
