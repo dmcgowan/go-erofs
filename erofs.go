@@ -34,7 +34,6 @@ var (
 
 // Stat is the erofs specific stat data returned by Stat and FileInfo requests
 type Stat struct {
-	XattrCount  int16
 	Mode        fs.FileMode
 	Size        int64
 	InodeLayout uint8
@@ -45,7 +44,7 @@ type Stat struct {
 	Mtime       uint64
 	MtimeNs     uint32
 	Nlink       int
-	// TODO: Include xattrs
+	Xattrs      map[string]string
 }
 
 // EroFS returns a FileSystem reading from the given readerat.
@@ -93,6 +92,24 @@ func (img *image) blkOffset() int64 {
 	return int64(img.sb.MetaBlkAddr) << int64(img.sb.BlkSizeBits)
 }
 
+func (img *image) loadAt(addr, size int64) (*block, error) {
+	blkSize := int64(1 << img.sb.BlkSizeBits)
+	if size > blkSize {
+		size = blkSize
+	}
+
+	b := img.getBlock()
+	if n, err := img.meta.ReadAt(b.buf[:size], addr); err != nil {
+		img.putBlock(b)
+		return nil, fmt.Errorf("failed to read %d bytes at %d: %w", size, addr, err)
+	} else {
+		b.offset = 0
+		b.end = int32(n)
+	}
+
+	return b, nil
+}
+
 // loadBlock loads the block with the given data
 func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 	nblocks := calculateBlocks(img.sb.BlkSizeBits, fi.size)
@@ -107,7 +124,7 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 	switch fi.inodeLayout {
 	case disk.LayoutFlatPlain:
 		// flat plain has no holes
-		addr = int64(int(fi.stat.InodeData)+bn) << img.sb.BlkSizeBits
+		addr = int64(int(fi.inodeData)+bn) << img.sb.BlkSizeBits
 		if bn == nblocks-1 {
 			blockEnd = int(fi.size - int64(bn)*int64(1<<img.sb.BlkSizeBits))
 		}
@@ -130,11 +147,11 @@ func (img *image) loadBlock(fi *fileInfo, pos int64) (*block, error) {
 			// Move the offset within the block based on position within file
 			blockOffset += int(pos - int64(bn<<int(img.sb.BlkSizeBits)))
 		} else {
-			addr = int64(int(fi.stat.InodeData)+bn) << img.sb.BlkSizeBits
+			addr = int64(int(fi.inodeData)+bn) << img.sb.BlkSizeBits
 		}
 	case disk.LayoutChunkBased:
 		// first 2 le bytes for format, second 2 bytes are reserved
-		format := uint16(fi.stat.InodeData)
+		format := uint16(fi.inodeData)
 		if format&^(disk.LayoutChunkFormatBits|disk.LayoutChunkFormatIndexes) != 0 {
 			return nil, fmt.Errorf("unsupported chunk format %x for nid %d: %w", format, fi.inode, ErrInvalid)
 		}
@@ -309,7 +326,7 @@ type file struct {
 	info   *fileInfo // cached fileInfo
 }
 
-func (b *file) readInfo(infoOnly bool) (*fileInfo, error) {
+func (b *file) readInfo(infoOnly bool) (fi *fileInfo, err error) {
 	if b.info != nil {
 		return b.info, nil
 	}
@@ -326,10 +343,18 @@ func (b *file) readInfo(infoOnly bool) (*fileInfo, error) {
 		blk.end = disk.SizeInodeExtended
 	}
 	ino := blk.bytes()
-	_, err := b.img.meta.ReadAt(ino, addr)
+	_, err = b.img.meta.ReadAt(ino, addr)
 	if err != nil {
 		return nil, err
 	}
+
+	defer func() {
+		v := recover()
+		if v != nil {
+			err = fmt.Errorf("file format error: %v", v)
+		}
+
+	}()
 
 	var format uint16
 	if _, err := binary.Decode(ino[:2], binary.LittleEndian, &format); err != nil {
@@ -347,24 +372,29 @@ func (b *file) readInfo(infoOnly bool) (*fileInfo, error) {
 			inode:       b.inode,
 			isize:       disk.SizeInodeCompact,
 			inodeLayout: layout,
+			inodeData:   inode.InodeData,
 			size:        int64(inode.Size),
 			mode:        (fs.FileMode(inode.Mode) & ^fs.ModeType) | b.ftype,
 			//modTime: time.Unix(int64(inode.Mtime), int64(inode.MtimeNs)),
 			// TODO: Set mtime to zero value?
-			stat: &Stat{
-				XattrCount:  int16(inode.XattrCount),
+		}
+		if inode.XattrCount > 0 {
+			b.info.xsize = int(inode.XattrCount-1)*disk.SizeXattrEntry + disk.SizeXattrBodyHeader
+		}
+		if infoOnly {
+			b.info.stat = &Stat{
 				Mode:        fs.FileMode(inode.Mode),
 				Size:        int64(inode.Size),
 				InodeLayout: layout,
-				InodeData:   inode.InodeData,
 				Inode:       int64(inode.Inode),
 				UID:         uint32(inode.UID),
 				GID:         uint32(inode.GID),
 				Nlink:       int(inode.Nlink),
 				//Mtime        uint64
 				//MtimeNs      uint32
-			},
+			}
 		}
+		addr += disk.SizeInodeCompact
 	} else {
 		var inode disk.InodeExtended
 		if _, err := binary.Decode(ino[:disk.SizeInodeExtended], binary.LittleEndian, &inode); err != nil {
@@ -375,28 +405,35 @@ func (b *file) readInfo(infoOnly bool) (*fileInfo, error) {
 			inode:       b.inode,
 			isize:       disk.SizeInodeExtended,
 			inodeLayout: layout,
+			inodeData:   inode.InodeData,
 			size:        int64(inode.Size),
 			mode:        (fs.FileMode(inode.Mode) & ^fs.ModeType) | b.ftype,
 			modTime:     time.Unix(int64(inode.Mtime), int64(inode.MtimeNs)),
-			stat: &Stat{
-				XattrCount:  int16(inode.XattrCount),
+		}
+		if inode.XattrCount > 0 {
+			b.info.xsize = int(inode.XattrCount-1)*disk.SizeXattrEntry + disk.SizeXattrBodyHeader
+		}
+		if infoOnly {
+			b.info.stat = &Stat{
 				Mode:        fs.FileMode(inode.Mode),
 				Size:        int64(inode.Size),
 				InodeLayout: layout,
-				InodeData:   inode.InodeData,
 				Inode:       int64(inode.Inode),
 				UID:         uint32(inode.UID),
 				GID:         uint32(inode.GID),
 				Nlink:       int(inode.Nlink),
 				Mtime:       inode.Mtime,
 				MtimeNs:     inode.MtimeNs,
-			},
+			}
 		}
+		addr += disk.SizeInodeExtended
 	}
 
-	// TODO: Load xattrs into stat
-
-	if !infoOnly || b.info.inodeLayout == disk.LayoutFlatPlain || b.info.size == 0 || blk.end != blkSize {
+	if infoOnly && b.info.xsize > 0 {
+		if err := setXattrs(b, addr, blk); err != nil {
+			return nil, err
+		}
+	} else if infoOnly || b.info.inodeLayout == disk.LayoutFlatPlain || b.info.size == 0 || blk.end != blkSize {
 		b.img.putBlock(blk)
 	} else {
 		// If the inode has trailing data used later, cache it
@@ -558,7 +595,9 @@ type fileInfo struct {
 	name        string
 	inode       uint64
 	isize       int8
+	xsize       int
 	inodeLayout uint8
+	inodeData   uint32
 	size        int64
 	mode        fs.FileMode
 	modTime     time.Time
@@ -591,13 +630,8 @@ func (fi *fileInfo) Sys() any {
 }
 
 func (fi *fileInfo) dataOffset() int64 {
-	var xattrSize int64
-	if fi.stat.XattrCount != 0 {
-		xattrSize = 12 + int64((fi.stat.XattrCount-1))*4
-	}
-
 	// inode size + xattr size
-	return int64(fi.isize) + xattrSize
+	return int64(fi.isize) + int64(fi.xsize)
 }
 func decodeSuperBlock(b [disk.SizeSuperBlock]byte, sb *disk.SuperBlock) error {
 	n, err := binary.Decode(b[:], binary.LittleEndian, sb)

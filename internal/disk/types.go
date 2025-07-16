@@ -4,10 +4,12 @@ const (
 	MagicNumber      = 0xe0f5e1e2
 	SuperBlockOffset = 1024
 
-	SizeSuperBlock    = 128
-	SizeInodeCompact  = 32
-	SizeInodeExtended = 64
-	SizeDirent        = 12
+	SizeSuperBlock      = 128
+	SizeInodeCompact    = 32
+	SizeInodeExtended   = 64
+	SizeDirent          = 12
+	SizeXattrBodyHeader = 12
+	SizeXattrEntry      = 4
 
 	LayoutFlatPlain         = 0
 	LayoutCompressedFull    = 1
@@ -98,9 +100,26 @@ type Dirent struct {
 //
 // inline xattrs must starts in erofs_xattr_ibody_header,
 // for read-only fs, no need to introduce h_refcount
+// Actual name is prefix | long prefix (prefix + infix) + name
 type XattrHeader struct {
-	NameFilter   uint32 // bit value 1 indicate not-present
-	SharedCount  uint8
-	Resolved     [7]uint8
-	SharedXattrs []uint32 // Variable in length, must be initialized before decode
+	NameFilter  uint32 // bit value 1 indicate not-present
+	SharedCount uint8
+	Reserved    [7]uint8
+}
+
+type XattrEntry struct {
+	NameLen   uint8  // length of name
+	NameIndex uint8  // index of name in XattrHeader, 0x80 set indicates long prefix at index&0x7F + XattrPrefixStart
+	ValueLen  uint16 // length of value
+	// Name+Value
+}
+
+type XattrLongPrefixitem struct {
+	PrefixAddr uint32 // address of the long prefix
+	PrefixLen  uint8  // length of the long prefix
+}
+
+type XattrLongPrefix struct {
+	BaseIndex uint8 // short xattr name prefix index
+	// Infix part after short prefix
 }
