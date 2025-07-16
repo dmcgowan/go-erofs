@@ -49,6 +49,13 @@ func main() {
 		}
 		fmt.Printf("\tMode: %o\n", fi.Mode())
 		fmt.Printf("\tModTime: %s\n", fi.ModTime())
+		st := fi.Sys().(*erofs.Stat)
+		if len(st.Xattrs) > 0 {
+			fmt.Printf("\tXattrs:\n")
+			for k, v := range st.Xattrs {
+				fmt.Printf("\t\t%s: %q\n", k, v)
+			}
+		}
 		if entry.Name() == "." || entry.Name() == ".." {
 			return fs.SkipDir
 		}
