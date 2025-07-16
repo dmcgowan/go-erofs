@@ -38,6 +38,22 @@ func TestBasic(t *testing.T) {
 			checkFileString(t, fs, "/usr/lib/testdir/CASE/file.txt", "upper case dir\n")
 			checkFileString(t, fs, "/usr/lib/testdir/case.txt", "lower case file\n")
 			checkFileString(t, fs, "/usr/lib/testdir/CASE.txt", "upper case file\n")
+			checkXattrs(t, fs, "/usr/lib/withxattr", map[string]string{
+				"user.custom":      "value1",
+				"user.xdg.comment": "some random comment",
+			})
+			checkXattrs(t, fs, "/usr/lib/withxattr/f1", map[string]string{
+				"user.xdg.comment": "comment for f1",
+			})
+			checkXattrs(t, fs, "/usr/lib/withxattr/f2", map[string]string{
+				"user.xdg.comment": "comment for f2",
+			})
+			checkXattrs(t, fs, "/usr/lib/withxattr/f3", map[string]string{
+				"user.xdg.comment": "comment for f3",
+			})
+			checkXattrs(t, fs, "/usr/lib/withxattr/f4", map[string]string{
+				"user.xdg.comment": "comment for f4",
+			})
 		})
 	}
 }
@@ -124,5 +140,32 @@ func checkNotExists(t testing.TB, fsys fs.FS, name string) {
 		t.Errorf("expected error opening %s", name)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected not exist error opening %s, got %v", name, err)
+	}
+}
+
+func checkXattrs(t testing.TB, fsys fs.FS, name string, expected map[string]string) {
+	t.Helper()
+
+	fi, err := fs.Stat(fsys, name)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	st, ok := fi.Sys().(*Stat)
+	if !ok {
+		t.Errorf("expected *Stat, got %T", fi.Sys())
+		return
+	}
+
+	if len(st.Xattrs) != len(expected) {
+		t.Errorf("Unexpected xattr count for %s: got %d, expected %d", name, len(st.Xattrs), len(expected))
+		return
+	}
+
+	for k, v := range expected {
+		if actual, ok := st.Xattrs[k]; !ok || actual != v {
+			t.Errorf("Unexpected xattr %q for %s: got %q, expected %q", k, name, actual, v)
+		}
 	}
 }
