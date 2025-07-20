@@ -75,7 +75,32 @@ func setXattrs(b *file, addr int64, blk *block) (err error) {
 			return err
 		}
 
-		// TODO: Read shared xattr (and cache?)
+		// TODO: Cache shared xattr blocks
+		blk, err := b.img.loadAt(int64(b.img.sb.XattrBlkAddr)<<b.img.sb.BlkSizeBits+int64(xattrAddr*4), int64(blkSize))
+		if err != nil {
+			return fmt.Errorf("failed to read shared xattr body for nid %d: %w", b.inode, err)
+		}
+		sb := blk.bytes()
+		var xattrEntry disk.XattrEntry
+		if _, err := binary.Decode(sb[:disk.SizeXattrEntry], binary.LittleEndian, &xattrEntry); err != nil {
+			return err
+		}
+		sb = sb[disk.SizeXattrEntry:]
+		var prefix string
+		if xattrEntry.NameIndex&0x80 == 0x80 {
+			//nameIndex := xattrEntry.NameIndex & 0x7F
+			// TODO: Get long prefix
+			return fmt.Errorf("shared xattr with long prefix not implemented for nid %d", b.inode)
+		} else if xattrEntry.NameIndex != 0 {
+			prefix = xattrIndex(xattrEntry.NameIndex).String()
+		}
+
+		if len(sb) < int(xattrEntry.NameLen)+int(xattrEntry.ValueLen) {
+			return fmt.Errorf("shared xattr too long for inode %d", b.inode)
+		}
+		name := prefix + string(sb[:xattrEntry.NameLen])
+		sb = sb[xattrEntry.NameLen:]
+		b.info.stat.Xattrs[name] = string(sb[:xattrEntry.ValueLen])
 
 		xb = xb[4:]
 	}

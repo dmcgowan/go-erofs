@@ -44,15 +44,19 @@ func TestBasic(t *testing.T) {
 			})
 			checkXattrs(t, fs, "/usr/lib/withxattr/f1", map[string]string{
 				"user.xdg.comment": "comment for f1",
+				"user.common":      "same-value",
 			})
 			checkXattrs(t, fs, "/usr/lib/withxattr/f2", map[string]string{
 				"user.xdg.comment": "comment for f2",
+				"user.common":      "same-value",
 			})
 			checkXattrs(t, fs, "/usr/lib/withxattr/f3", map[string]string{
 				"user.xdg.comment": "comment for f3",
+				"user.common":      "same-value",
 			})
 			checkXattrs(t, fs, "/usr/lib/withxattr/f4", map[string]string{
 				"user.xdg.comment": "comment for f4",
+				"user.common":      "same-value",
 			})
 		})
 	}
@@ -165,7 +169,11 @@ func checkXattrs(t testing.TB, fsys fs.FS, name string, expected map[string]stri
 
 	for k, v := range expected {
 		if actual, ok := st.Xattrs[k]; !ok || actual != v {
-			t.Errorf("Unexpected xattr %q for %s: got %q, expected %q", k, name, actual, v)
+			if !ok {
+				t.Errorf("Missing xattr %q for %s: %v", k, name, st.Xattrs)
+			} else {
+				t.Errorf("Unexpected xattr %q for %s: got %q, expected %q", k, name, actual, v)
+			}
 		}
 	}
 }
