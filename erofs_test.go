@@ -18,46 +18,51 @@ func TestBasic(t *testing.T) {
 		// TODO: Add compressed layout
 	} {
 		t.Run(name, func(t *testing.T) {
-			fs, err := EroFS(loadTestFile(t, "basic-"+name))
+			efs, err := EroFS(loadTestFile(t, "basic-"+name))
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			checkFileString(t, fs, "/in-root.txt", "root file content\n")
-			checkFileString(t, fs, "/usr/lib/testdir/emptyfile", "")
-			checkFileBytes(t, fs, "/usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13))
-			checkFileBytes(t, fs, "/usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16))
-			checkFileBytes(t, fs, "/usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5))
-			checkFileBytes(t, fs, "/usr/lib/testdir/16k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16))
-			checkDirectorySize(t, fs, "/usr/lib/testdir/emptydir", 0)
-			checkDirectorySize(t, fs, "/usr/lib/testdir/lotsoffiles", 5000)
-			checkNotExists(t, fs, "/not-exists.txt")
-			checkNotExists(t, fs, "/not-exists/somefile")
-			checkNotExists(t, fs, "/usr/lib/testdir/emptydir/somefile")
-			checkFileString(t, fs, "/usr/lib/testdir/case/file.txt", "lower case dir\n")
-			checkFileString(t, fs, "/usr/lib/testdir/CASE/file.txt", "upper case dir\n")
-			checkFileString(t, fs, "/usr/lib/testdir/case.txt", "lower case file\n")
-			checkFileString(t, fs, "/usr/lib/testdir/CASE.txt", "upper case file\n")
-			checkXattrs(t, fs, "/usr/lib/withxattr", map[string]string{
+			checkFileString(t, efs, "/in-root.txt", "root file content\n")
+			checkFileString(t, efs, "/usr/lib/testdir/emptyfile", "")
+			checkFileBytes(t, efs, "/usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13))
+			checkFileBytes(t, efs, "/usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16))
+			checkFileBytes(t, efs, "/usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5))
+			checkFileBytes(t, efs, "/usr/lib/testdir/16k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16))
+			checkDirectorySize(t, efs, "/usr/lib/testdir/emptydir", 0)
+			checkDirectorySize(t, efs, "/usr/lib/testdir/lotsoffiles", 5000)
+			checkNotExists(t, efs, "/not-exists.txt")
+			checkNotExists(t, efs, "/not-exists/somefile")
+			checkNotExists(t, efs, "/usr/lib/testdir/emptydir/somefile")
+			checkFileString(t, efs, "/usr/lib/testdir/case/file.txt", "lower case dir\n")
+			checkFileString(t, efs, "/usr/lib/testdir/CASE/file.txt", "upper case dir\n")
+			checkFileString(t, efs, "/usr/lib/testdir/case.txt", "lower case file\n")
+			checkFileString(t, efs, "/usr/lib/testdir/CASE.txt", "upper case file\n")
+			checkXattrs(t, efs, "/usr/lib/withxattr", map[string]string{
 				"user.custom":      "value1",
 				"user.xdg.comment": "some random comment",
 			})
-			checkXattrs(t, fs, "/usr/lib/withxattr/f1", map[string]string{
+			checkXattrs(t, efs, "/usr/lib/withxattr/f1", map[string]string{
 				"user.xdg.comment": "comment for f1",
 				"user.common":      "same-value",
 			})
-			checkXattrs(t, fs, "/usr/lib/withxattr/f2", map[string]string{
+			checkXattrs(t, efs, "/usr/lib/withxattr/f2", map[string]string{
 				"user.xdg.comment": "comment for f2",
 				"user.common":      "same-value",
 			})
-			checkXattrs(t, fs, "/usr/lib/withxattr/f3", map[string]string{
+			checkXattrs(t, efs, "/usr/lib/withxattr/f3", map[string]string{
 				"user.xdg.comment": "comment for f3",
 				"user.common":      "same-value",
 			})
-			checkXattrs(t, fs, "/usr/lib/withxattr/f4", map[string]string{
+			checkXattrs(t, efs, "/usr/lib/withxattr/f4", map[string]string{
 				"user.xdg.comment": "comment for f4",
 				"user.common":      "same-value",
 			})
+			checkDevice(t, efs, "/dev/block0", fs.ModeDevice, 0x00000101)
+			checkDevice(t, efs, "/dev/block1", fs.ModeDevice, 0)
+			checkDevice(t, efs, "/dev/char0", fs.ModeCharDevice, 0x00000202)
+			checkDevice(t, efs, "/dev/char1", fs.ModeCharDevice, 0x00000303)
+			checkDevice(t, efs, "/dev/fifo0", fs.ModeNamedPipe, 0)
 		})
 	}
 }
@@ -122,6 +127,34 @@ func checkFileBytes(t testing.TB, fsys fs.FS, name string, content []byte) {
 		}
 		t.Fail()
 	}
+}
+
+func checkDevice(t testing.TB, fsys fs.FS, name string, ftype fs.FileMode, rdev uint32) {
+	t.Helper()
+
+	f, err := fsys.Open(name)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	st := fi.Sys().(*Stat)
+	if st.Mode&fs.ModeType != ftype {
+		t.Errorf("Unexpected file type in %s\n\tMode: %x\n\tExpected Type: %x", name, st.Mode, ftype)
+		return
+	}
+
+	if st.Rdev != rdev {
+		t.Errorf("Unexpected rdev in %s\n\tActual Rdev: %x\n\tExpected Rdev: %x", name, st.Rdev, rdev)
+		return
+	}
+
 }
 
 func checkDirectorySize(t testing.TB, fsys fs.FS, name string, n int) {

@@ -37,7 +37,7 @@ type Stat struct {
 	Mode        fs.FileMode
 	Size        int64
 	InodeLayout uint8
-	InodeData   uint32
+	Rdev        uint32
 	Inode       int64
 	UID         uint32
 	GID         uint32
@@ -383,10 +383,11 @@ func (b *file) readInfo(infoOnly bool) (fi *fileInfo, err error) {
 		}
 		if infoOnly {
 			b.info.stat = &Stat{
-				Mode:        fs.FileMode(inode.Mode),
+				Mode:        disk.EroFSModeToGoFileMode(inode.Mode),
 				Size:        int64(inode.Size),
 				InodeLayout: layout,
 				Inode:       int64(inode.Inode),
+				Rdev:        disk.RdevFromMode(inode.Mode, inode.InodeData),
 				UID:         uint32(inode.UID),
 				GID:         uint32(inode.GID),
 				Nlink:       int(inode.Nlink),
@@ -415,10 +416,11 @@ func (b *file) readInfo(infoOnly bool) (fi *fileInfo, err error) {
 		}
 		if infoOnly {
 			b.info.stat = &Stat{
-				Mode:        fs.FileMode(inode.Mode),
+				Mode:        disk.EroFSModeToGoFileMode(inode.Mode),
 				Size:        int64(inode.Size),
 				InodeLayout: layout,
 				Inode:       int64(inode.Inode),
+				Rdev:        disk.RdevFromMode(inode.Mode, inode.InodeData),
 				UID:         uint32(inode.UID),
 				GID:         uint32(inode.GID),
 				Nlink:       int(inode.Nlink),
