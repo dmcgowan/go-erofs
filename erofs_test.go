@@ -15,7 +15,10 @@ func TestBasic(t *testing.T) {
 		"default",
 		"chunk-4096",
 		"chunk-8192",
-		// TODO: Add compressed layout
+		"lz4",
+		"lzma",
+		"deflate",
+		"zstd",
 	} {
 		t.Run(name, func(t *testing.T) {
 			efs, err := EroFS(loadTestFile(t, "basic-"+name))
