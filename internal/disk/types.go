@@ -4,6 +4,9 @@ const (
 	MagicNumber      = 0xe0f5e1e2
 	SuperBlockOffset = 1024
 
+	BlockSize = 4096
+	BlkBits   = 12
+
 	FeatureIncompatLZ4_0Padding         = 0x1
 	FeatureIncompatChunkedFile          = 0x4
 	FeatureIncompatDeviceTable          = 0x8
@@ -17,6 +20,8 @@ const (
 	SizeInodeCompact    = 32
 	SizeInodeExtended   = 64
 	SizeDirent          = 12
+	SizeChunkIndex      = 8
+	SizeDeviceSlot      = 128
 	SizeXattrBodyHeader = 12
 	SizeXattrEntry      = 4
 
@@ -29,6 +34,8 @@ const (
 	LayoutChunkFormatBits    = 0x001F
 	LayoutChunkFormatIndexes = 0x0020
 	LayoutChunkFormat48Bit   = 0x0040
+
+	NullAddr = 0xFFFFFFFF
 )
 
 // SuperBlock represents the EROFS on-disk superblock.
@@ -141,4 +148,14 @@ type InodeChunkIndex struct {
 	StartBlkHi uint16 // part of 48-bit support (not yet implemented)
 	DeviceID   uint16
 	StartBlkLo uint32
+}
+
+// DeviceSlot is the 128-byte on-disk device slot entry.
+type DeviceSlot struct {
+	Tag       [64]byte
+	BlocksLo  uint32
+	UniAddrLo uint32
+	BlocksHi  uint32
+	UniAddrHi uint16
+	Reserved  [50]byte
 }
