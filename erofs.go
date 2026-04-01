@@ -16,6 +16,148 @@ import (
 	"github.com/erofs/go-erofs/internal/disk"
 )
 
+const (
+	inodeCacheSize = 128
+	dirCacheSize   = 64
+)
+
+type dirCacheEntry struct {
+	entries map[string]dirEntryInfo
+}
+
+type dirEntryInfo struct {
+	nid   uint64
+	ftype fs.FileMode
+}
+
+type dirCache struct {
+	mu   sync.RWMutex
+	data map[uint64]*dirCacheEntry
+}
+
+func newDirCache() *dirCache {
+	return &dirCache{
+		data: make(map[uint64]*dirCacheEntry, dirCacheSize),
+	}
+}
+
+func (c *dirCache) Get(nid uint64) (map[string]dirEntryInfo, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.data[nid]
+	if !ok {
+		return nil, false
+	}
+	return entry.entries, true
+}
+
+func (c *dirCache) Put(nid uint64, entries map[string]dirEntryInfo) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data[nid] = &dirCacheEntry{entries: entries}
+	if len(c.data) > dirCacheSize {
+		for k := range c.data {
+			delete(c.data, k)
+			break
+		}
+	}
+}
+
+func (c *dirCache) Invalidate(nid uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.data, nid)
+}
+
+type inodeCache struct {
+	mu   sync.RWMutex
+	data map[uint64]*cacheEntry
+	head *cacheEntry
+	tail *cacheEntry
+}
+
+type cacheEntry struct {
+	key   uint64
+	value *fileInfo
+	prev  *cacheEntry
+	next  *cacheEntry
+}
+
+func newInodeCache() *inodeCache {
+	return &inodeCache{
+		data: make(map[uint64]*cacheEntry, inodeCacheSize),
+	}
+}
+
+func (c *inodeCache) Get(nid uint64) (*fileInfo, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.data[nid]
+	if !ok {
+		return nil, false
+	}
+	return entry.value, true
+}
+
+func (c *inodeCache) Put(nid uint64, fi *fileInfo) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if ent, ok := c.data[nid]; ok {
+		c.moveToFront(ent)
+		return
+	}
+
+	entry := &cacheEntry{key: nid, value: fi}
+	c.data[nid] = entry
+	c.addToFront(entry)
+
+	if len(c.data) > inodeCacheSize {
+		c.removeTail()
+	}
+}
+
+func (c *inodeCache) moveToFront(e *cacheEntry) {
+	if e == c.head {
+		return
+	}
+	e.prev.next = e.next
+	if e.next != nil {
+		e.next.prev = e.prev
+	} else {
+		c.tail = e.prev
+	}
+	e.prev = nil
+	e.next = c.head
+	c.head.prev = e
+	c.head = e
+}
+
+func (c *inodeCache) addToFront(e *cacheEntry) {
+	e.next = c.head
+	if c.head != nil {
+		c.head.prev = e
+	}
+	c.head = e
+	if c.tail == nil {
+		c.tail = e
+	}
+}
+
+func (c *inodeCache) removeTail() {
+	if c.tail == nil {
+		return
+	}
+	delete(c.data, c.tail.key)
+	if c.tail.prev != nil {
+		c.tail.prev.next = nil
+		c.tail = c.tail.prev
+	} else {
+		c.head = nil
+		c.tail = nil
+	}
+}
+
 // Errors
 var (
 	// ErrInvalid occurs when an invalid value is detected in the erofs data.
@@ -87,7 +229,9 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	}
 
 	i := image{
-		meta: r,
+		meta:       r,
+		inodeCache: newInodeCache(),
+		dirCache:   newDirCache(),
 	}
 	if err = decodeSuperBlock(superBlock, &i.sb); err != nil {
 		return nil, err
@@ -183,9 +327,11 @@ type image struct {
 	devices      []deviceInfo // parsed device table entries
 	deviceIDMask uint16
 	blkPool      sync.Pool
-	longPrefixes []string // cached long xattr prefixes
+	longPrefixes []string
 	prefixesOnce sync.Once
 	prefixesErr  error
+	inodeCache   *inodeCache
+	dirCache     *dirCache
 }
 
 // start physical offset of the separate metadata zone
@@ -583,30 +729,39 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 		if ftype != fs.ModeDir {
 			return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: errors.New("not a directory")}
 		}
-		d := &dir{
-			file: file{
-				img:   i,
-				name:  basename,
-				nid:   nid,
-				ftype: ftype,
-			},
-		}
-		// TODO: Lookup in directory instead of reading all
-		entries, err := d.ReadDir(-1)
-		if err != nil {
-			return 0, 0, "", fmt.Errorf("failed to read dir: %w", err)
-		}
-		var found bool
-		for _, e := range entries {
-			if e.Name() == basename {
-				nid = e.(*direntry).nid
-				ftype = e.(*direntry).ftype & fs.ModeType
-				found = true
+
+		var entries map[string]dirEntryInfo
+		entries, ok := i.dirCache.Get(nid)
+		if !ok {
+			d := &dir{
+				file: file{
+					img:   i,
+					name:  basename,
+					nid:   nid,
+					ftype: ftype,
+				},
 			}
+			dirEntries, err := d.ReadDir(-1)
+			if err != nil {
+				return 0, 0, "", fmt.Errorf("failed to read dir: %w", err)
+			}
+			entries = make(map[string]dirEntryInfo, len(dirEntries))
+			for _, e := range dirEntries {
+				de := e.(*direntry)
+				entries[de.Name()] = dirEntryInfo{
+					nid:   de.nid,
+					ftype: de.ftype & fs.ModeType,
+				}
+			}
+			i.dirCache.Put(nid, entries)
 		}
+
+		entry, found := entries[basename]
 		if !found {
 			return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: fs.ErrNotExist}
 		}
+		nid = entry.nid
+		ftype = entry.ftype
 
 		// Follow symlinks for intermediate components always,
 		// and for the final component only when follow is true.
@@ -756,14 +911,17 @@ func (b *file) readInfo(infoOnly bool) (fi *fileInfo, err error) {
 		return b.info, nil
 	}
 
+	if fi, ok := b.img.inodeCache.Get(b.nid); ok {
+		b.info = fi
+		return fi, nil
+	}
+
 	addr := b.img.metaStartPos() + int64(b.nid*disk.SizeInodeCompact)
 	blkSize := int32(1 << b.img.sb.BlkSizeBits)
 	blk := b.img.getBlock()
 	blk.offset = int32(addr & int64(blkSize-1))
 	blk.end = blkSize
 	if blk.end-blk.offset < disk.SizeInodeExtended {
-		// Use buffer starting from beginning of inode, do not use the position
-		// in the block since an extended inode may span multiple blocks
 		blk.offset = 0
 		blk.end = disk.SizeInodeExtended
 	}
@@ -870,6 +1028,8 @@ func (b *file) readInfo(infoOnly bool) (fi *fileInfo, err error) {
 		// If the inode has trailing data used later, cache it
 		b.info.cached = blk
 	}
+
+	b.img.inodeCache.Put(b.nid, b.info)
 	return b.info, nil
 }
 
@@ -908,7 +1068,9 @@ func (b *file) Read(p []byte) (int, error) {
 }
 
 func (b *file) Close() error {
-	b.info.cached = nil
+	if b.info != nil {
+		b.info.cached = nil
+	}
 	return nil
 }
 
