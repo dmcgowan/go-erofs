@@ -66,6 +66,11 @@ var (
 	// a directory.
 	ErrIsDirectory = errors.New("is a directory")
 
+	// ErrDirNotEmpty is returned by Remove when the named path is a
+	// non-empty directory. Mirrors the behavior of os.Remove (which returns
+	// ENOTEMPTY).
+	ErrDirNotEmpty = errors.New("directory not empty")
+
 	// ErrLoop is returned when too many symlinks are encountered during
 	// path resolution.
 	ErrLoop = fmt.Errorf("too many symlinks: %w", ErrInvalid)

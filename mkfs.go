@@ -749,6 +749,41 @@ func (fsys *Writer) Link(oldname, newname string) error {
 	return nil
 }
 
+// Remove removes the named path from the writer's tree. It mirrors the
+// semantics of [os.Remove]: it is non-recursive, returns [fs.ErrNotExist]
+// (wrapped in [fs.PathError]) if the path does not exist, and returns
+// [ErrDirNotEmpty] if the path is a non-empty directory.
+//
+// Removing one name of a hard-linked file only removes that name and
+// decrements the shared fsInode's link count; the underlying data and any
+// other names referring to it are unaffected.
+//
+// Remove cannot be used to delete the root.
+func (fsys *Writer) Remove(name string) error {
+	if fsys.wErr != nil {
+		return fsys.wErr
+	}
+	name = cleanPath(name)
+	if name == "/" {
+		return &fs.PathError{Op: "remove", Path: name, Err: fmt.Errorf("cannot remove root")}
+	}
+
+	e, err := fsys.resolveEntry("remove", name)
+	if err != nil {
+		return err
+	}
+	if e.ino.mode&disk.StatTypeMask == disk.StatTypeDir {
+		for _, c := range e.children {
+			if !c.removed {
+				return &fs.PathError{Op: "remove", Path: name, Err: ErrDirNotEmpty}
+			}
+		}
+	}
+
+	fsys.remove(name)
+	return nil
+}
+
 // --- File methods ---
 
 // Write appends data to the file.
