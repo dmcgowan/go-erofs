@@ -1,6 +1,7 @@
 package erofs
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -780,6 +781,40 @@ func (fsys *Writer) Remove(name string) error {
 		}
 	}
 
+	fsys.remove(name)
+	return nil
+}
+
+// RemoveAll removes the named path and any children it contains. Removal is
+// recursive, and it returns nil (no error) if the path does not exist.
+// Unlike a simple absence, a path that traverses a non-directory ancestor
+// (e.g. removing "/file/child" when "/file" is a regular file) still
+// returns ErrNotDirectory, matching [Writer.Remove].
+//
+// As with hard-linked files under [Writer.Remove], removing a name only
+// decrements the shared fsInode's link count; data referenced by surviving
+// names elsewhere in the tree is unaffected.
+//
+// RemoveAll cannot be used to delete the root.
+func (fsys *Writer) RemoveAll(name string) error {
+	if fsys.wErr != nil {
+		return fsys.wErr
+	}
+	name = cleanPath(name)
+	if name == "/" {
+		return &fs.PathError{Op: "removeall", Path: name, Err: fmt.Errorf("cannot remove root")}
+	}
+
+	_, err := fsys.resolveEntry("removeall", name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	// The internal remove() is already recursive for directories (it calls
+	// removeSubtree), so no per-child empty check is needed here.
 	fsys.remove(name)
 	return nil
 }

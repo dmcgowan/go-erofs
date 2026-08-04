@@ -4,51 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"io/fs"
-	"path"
 	"testing"
 
 	erofs "github.com/erofs/go-erofs"
 	"github.com/erofs/go-erofs/internal/erofstest"
 )
-
-// removeAll is a caller-side recursive remove implemented on top of
-// Writer.Remove + fs.ReadDir. It is duplicated in the test rather than
-// added to the public API to demonstrate that recursive removal does not
-// require a dedicated writer method.
-func removeAll(w *erofs.Writer, p string) error {
-	entries, err := fs.ReadDir(w, cleanForReadDir(p))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		// Not a directory: fall through to Remove below.
-		var pe *fs.PathError
-		if !errors.As(err, &pe) {
-			return err
-		}
-	}
-	for _, e := range entries {
-		if err := removeAll(w, path.Join(p, e.Name())); err != nil {
-			return err
-		}
-	}
-	if err := w.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
-// cleanForReadDir converts an absolute writer path to the form
-// fs.ReadDir expects (relative, no leading slash; "." for root).
-func cleanForReadDir(p string) string {
-	if p == "/" || p == "" {
-		return "."
-	}
-	if len(p) > 0 && p[0] == '/' {
-		return p[1:]
-	}
-	return p
-}
 
 // TestWriterRemoveFile verifies Remove deletes a regular file and the
 // resulting image contains no trace of it.
@@ -346,10 +306,9 @@ func TestWriterRemoveHardlinkAllAliases(t *testing.T) {
 	erofstest.CheckDirEntries(t, efs, ".", []string{})
 }
 
-// TestCallerRecursiveRemove verifies that callers can implement recursive
-// removal on top of Writer.Remove + fs.ReadDir without a dedicated writer
-// method.
-func TestCallerRecursiveRemove(t *testing.T) {
+// TestWriterRemoveAllRecursive verifies RemoveAll deletes a directory and
+// all of its descendants, leaving unrelated paths untouched.
+func TestWriterRemoveAllRecursive(t *testing.T) {
 	var buf testBuffer
 	w := erofs.Create(&buf)
 
@@ -383,8 +342,8 @@ func TestCallerRecursiveRemove(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := removeAll(w, "/dir"); err != nil {
-		t.Fatal("removeAll:", err)
+	if err := w.RemoveAll("/dir"); err != nil {
+		t.Fatal("RemoveAll:", err)
 	}
 
 	if err := w.Close(); err != nil {
@@ -400,20 +359,79 @@ func TestCallerRecursiveRemove(t *testing.T) {
 	erofstest.CheckDirEntries(t, efs, "other", []string{"keep"})
 }
 
-// TestCallerRecursiveRemoveMissing verifies the caller-side recursive
-// pattern is a no-op on a path that does not exist.
-func TestCallerRecursiveRemoveMissing(t *testing.T) {
+// TestWriterRemoveAllMissing verifies RemoveAll is a no-op (returns nil) on
+// a path that does not exist.
+func TestWriterRemoveAllMissing(t *testing.T) {
 	var buf testBuffer
 	w := erofs.Create(&buf)
-	if err := removeAll(w, "/does/not/exist"); err != nil {
-		t.Fatalf("removeAll missing: got %v, want nil", err)
+	if err := w.RemoveAll("/does/not/exist"); err != nil {
+		t.Fatalf("RemoveAll missing: got %v, want nil", err)
 	}
 }
 
-// TestCallerRecursiveRemoveHardlinkInside verifies that the caller-side
-// recursive pattern over a subtree containing a hardlink alias correctly
-// updates the canonical entry's link count when the alias is removed.
-func TestCallerRecursiveRemoveHardlinkInside(t *testing.T) {
+// TestWriterRemoveAllNonDirectoryAncestor verifies RemoveAll returns
+// ErrNotDirectory (not nil) when a path component along the way is an
+// existing non-directory, matching Writer.Remove instead of silently
+// treating it as a missing path.
+func TestWriterRemoveAllNonDirectoryAncestor(t *testing.T) {
+	var buf testBuffer
+	w := erofs.Create(&buf)
+
+	f, err := w.Create("/file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = w.RemoveAll("/file/child")
+	if !errors.Is(err, erofs.ErrNotDirectory) {
+		t.Fatalf("RemoveAll through non-directory: got %v, want ErrNotDirectory", err)
+	}
+}
+
+// TestWriterRemoveAllRoot verifies RemoveAll cannot delete "/".
+func TestWriterRemoveAllRoot(t *testing.T) {
+	var buf testBuffer
+	w := erofs.Create(&buf)
+	if err := w.RemoveAll("/"); err == nil {
+		t.Fatal("expected error removing root")
+	}
+}
+
+// TestWriterRemoveAllFile verifies RemoveAll works on a single regular
+// file, just like Remove.
+func TestWriterRemoveAllFile(t *testing.T) {
+	var buf testBuffer
+	w := erofs.Create(&buf)
+
+	f, err := w.Create("/drop.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.RemoveAll("/drop.txt"); err != nil {
+		t.Fatal("RemoveAll file:", err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	erofstest.FsckErofsBytes(t, buf.Bytes())
+	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	erofstest.CheckDirEntries(t, efs, ".", []string{})
+}
+
+// TestWriterRemoveAllHardlinkInside verifies that RemoveAll over a subtree
+// containing a hardlink alias correctly updates the canonical entry's link
+// count when the alias is removed.
+func TestWriterRemoveAllHardlinkInside(t *testing.T) {
 	var buf testBuffer
 	w := erofs.Create(&buf)
 
@@ -437,7 +455,7 @@ func TestCallerRecursiveRemoveHardlinkInside(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := removeAll(w, "/scratch"); err != nil {
+	if err := w.RemoveAll("/scratch"); err != nil {
 		t.Fatal(err)
 	}
 
