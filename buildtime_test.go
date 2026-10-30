@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	erofs "github.com/erofs/go-erofs"
 	"github.com/erofs/go-erofs/internal/disk"
+	"github.com/erofs/go-erofs/internal/erofstest"
 )
 
 type mtimeEntry struct {
@@ -252,4 +257,93 @@ func TestBuildTimeNanosecondCompact(t *testing.T) {
 		t.Error("b (100, 500) is not compact with build time (100, 500)")
 	}
 	checkMtimes(t, fsys, entries)
+}
+
+// TestRead48BitMkfs checks that images written by mkfs.erofs -E48bit read
+// back correctly: compact inodes with per-inode mtimes, and extended inodes,
+// which carry the null block address (i_nb 0xffff) when they have no data
+// blocks.
+func TestRead48BitMkfs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mkfs.erofs directory-source mode not available on Windows")
+	}
+	if _, err := exec.LookPath("mkfs.erofs"); err != nil {
+		t.Skip("mkfs.erofs not available")
+	}
+	src := t.TempDir()
+	entries := []mtimeEntry{{"a", 1000, 0}, {"b", 1700000000, 0}, {"c", 1800000000, 0}, {"d/e", 1700000000, 0}}
+	if err := os.Mkdir(filepath.Join(src, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		p := filepath.Join(src, e.name)
+		if err := os.WriteFile(p, []byte(e.name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, time.Unix(e.sec, 0), time.Unix(e.sec, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(src, "empty"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a", filepath.Join(src, "link")); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{filepath.Join(src, "d"), src} {
+		if err := os.Chtimes(d, time.Unix(1000, 0), time.Unix(1000, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		// compact reports whether the regular files are compact inodes.
+		compact bool
+	}{
+		{"compact", nil, true},
+		// A uid above 65535 makes every inode extended.
+		{"extended", []string{"--force-uid=70000"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "img.erofs")
+			args := append([]string{"-E48bit", "-T1800000000", "--mkfs-time"}, tc.args...)
+			cmd := exec.Command("mkfs.erofs", append(args, out, src)...)
+			if b, err := cmd.CombinedOutput(); err != nil {
+				t.Skipf("mkfs.erofs -E48bit: %v\n%s", err, b)
+			}
+			img, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sb := readSuperBlock(t, img); sb.FeatureIncompat&disk.FeatureIncompat48Bit == 0 {
+				t.Skip("mkfs.erofs did not write a 48-bit image")
+			}
+			fsys := openImage(t, img)
+			checkMtimes(t, fsys, entries)
+			for _, e := range entries {
+				if got := isCompact(t, img, fsys, e.name); got != tc.compact {
+					t.Errorf("%s compact = %v, want %v", e.name, got, tc.compact)
+				}
+				fi, err := fs.Stat(fsys, e.name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if n := fi.Sys().(*erofs.Stat).Nlink; n != 1 {
+					t.Errorf("%s nlink = %d, want 1", e.name, n)
+				}
+				erofstest.CheckFile(t, fsys, e.name, e.name)
+			}
+			erofstest.CheckFile(t, fsys, "empty", "")
+			if got, err := fsys.(interface{ ReadLink(string) (string, error) }).ReadLink("link"); err != nil || got != "a" {
+				t.Errorf("ReadLink(link) = %q, %v; want \"a\"", got, err)
+			}
+			for _, opts := range [][]erofs.CopyOpt{nil, {erofs.MetadataOnly()}} {
+				if err := erofs.Create(&testBuffer{}).CopyFrom(fsys, opts...); err != nil {
+					t.Errorf("CopyFrom(%d opts): %v", len(opts), err)
+				}
+			}
+		})
+	}
 }
