@@ -529,7 +529,11 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 				if st, ok := info.Sys().(*Stat); ok {
 					f := file{img: srcImg, nid: uint64(st.Ino)}
 					if ino, err := f.readInfo(); err == nil {
-						if dr := srcImg.openDirect(ino); dr != nil {
+						dr := srcImg.openDirect(ino)
+						// Return the block readInfo cached for inline data;
+						// dr reads the image directly.
+						_ = f.Close()
+						if dr != nil {
 							if be == nil {
 								be = &builder.Entry{}
 							}
