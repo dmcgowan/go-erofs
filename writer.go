@@ -1,6 +1,7 @@
 package erofs
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
@@ -97,12 +98,12 @@ func (w *erofsWriter) writeSeekable(out io.WriteSeeker) error {
 		return err
 	}
 
-	// Buffer and write metadata.
-	meta := w.newMetaBuffer()
+	// Write metadata through a fixed-size buffer.
+	meta := bufio.NewWriterSize(out, metaBufferSize)
 	if err := w.writeMetadataInodes(meta); err != nil {
 		return err
 	}
-	if _, err := meta.WriteTo(out); err != nil {
+	if err := meta.Flush(); err != nil {
 		return err
 	}
 
@@ -113,28 +114,8 @@ func (w *erofsWriter) writeSeekable(out io.WriteSeeker) error {
 	return w.writeBlock0(out)
 }
 
-// newMetaBuffer returns a pre-sized bytes.Buffer for metadata serialization.
-func (w *erofsWriter) newMetaBuffer() *bytes.Buffer {
-	totalMetaBytes := 0
-	for _, e := range w.entries {
-		if e.hardLinkPrimary != nil {
-			continue // secondary entries share the primary's on-disk inode
-		}
-		isz := disk.SizeInodeExtended
-		if e.compact {
-			isz = disk.SizeInodeCompact
-		}
-		sz := isz + e.xattrSize + e.chunkPad + e.trailingSize
-		if sz%32 != 0 {
-			sz = (sz + 31) & ^31
-		}
-		totalMetaBytes += sz
-	}
-	// SB area + metadata padded to block boundary.
-	capacity := w.blockSize + ((totalMetaBytes + w.blockSize - 1) & ^(w.blockSize - 1))
-	buf := bytes.NewBuffer(make([]byte, 0, capacity))
-	return buf
-}
+// metaBufferSize is the size of the buffer metadata is written through.
+const metaBufferSize = 256 << 10
 
 // assignDataBlocks assigns data block addresses to flat-plain entries.
 // For metadata-first layout, data follows metadata.
