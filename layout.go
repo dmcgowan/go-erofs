@@ -95,14 +95,15 @@ func (w *erofsWriter) baseLayout(e *erofsEntry) uint8 {
 }
 
 // inlineSize returns the number of bytes e would store after its inode with
-// the flat-inline layout, or -1 if e cannot use it. Inline data must not
-// cross a block boundary, so header and data must fit in one block.
+// the flat-inline layout, or -1 if e cannot use it. For regular files this
+// is the part after the last full block. Inline data must not cross a block
+// boundary, so header and data must fit in one block.
 func (w *erofsWriter) inlineSize(e *erofsEntry, headerSize int) int {
 	n := -1
 	switch e.mode & disk.StatTypeMask {
 	case disk.StatTypeReg:
-		if !w.noInlineData && e.size > 0 && e.data != nil {
-			n = int(e.size)
+		if !w.noInlineData && e.data != nil {
+			n = regInlineSize(e.size, w.blockSize)
 		}
 	case disk.StatTypeDir:
 		n = w.direntDataSize(e)
@@ -138,6 +139,13 @@ func (w *erofsWriter) placeEntry(e *erofsEntry, off, headerSize, inline int) int
 		return off + left
 	}
 	return off
+}
+
+// regInlineSize returns the bytes of a regular file of the given size that
+// the flat-inline layout stores after the inode: the part after the last
+// full block. The full blocks are stored in data blocks.
+func regInlineSize(size uint64, blockSize int) int {
+	return int(size % uint64(blockSize))
 }
 
 // roundUp32 rounds n up to a multiple of 32, the inode slot size.
@@ -178,7 +186,7 @@ func (w *erofsWriter) calcTrailingSize(e *erofsEntry) int {
 			return nchunks * disk.SizeChunkIndex
 		}
 		if e.layout == disk.LayoutFlatInline {
-			return int(e.size)
+			return regInlineSize(e.size, w.blockSize)
 		}
 		return 0
 	case disk.StatTypeDir:

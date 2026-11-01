@@ -148,3 +148,60 @@ func TestLayoutNoInlineData(t *testing.T) {
 		}
 	}
 }
+
+// TestLayoutInlineTail checks that a regular file larger than a block keeps
+// its full blocks in data blocks and stores the rest after its inode, and
+// that such images copy correctly.
+func TestLayoutInlineTail(t *testing.T) {
+	pattern := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte('a' + i%23)
+		}
+		return string(b)
+	}
+	files := []layoutFile{
+		{name: "/tail", content: pattern(5000)},
+		{name: "/multi", content: pattern(3*4096 + 10)},
+		{name: "/exact", content: pattern(2 * 4096)},
+		{name: "/large-tail", content: pattern(4096 + 4090)}, // tail too big to inline
+	}
+	efs, img := buildLayoutImage(t, files)
+	want := map[string]uint8{
+		"tail":       disk.LayoutFlatInline,
+		"multi":      disk.LayoutFlatInline,
+		"exact":      disk.LayoutFlatPlain,
+		"large-tail": disk.LayoutFlatPlain,
+	}
+	for name, layout := range want {
+		if got := layoutOf(t, efs, name); got != layout {
+			t.Errorf("%s layout = %d, want %d", name, got, layout)
+		}
+	}
+
+	buf := &testBuffer{}
+	w := erofs.Create(buf)
+	if err := w.CopyFrom(efs); err != nil {
+		t.Fatalf("CopyFrom: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), img) {
+		t.Error("CopyFrom of the image produced a different image")
+	}
+	copied, err := erofs.Open(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Open copy: %v", err)
+	}
+	for _, f := range files {
+		erofstest.CheckFile(t, copied, f.name[1:], f.content)
+	}
+
+	noInline, _ := buildLayoutImage(t, files, erofs.WithNoInlineData())
+	for _, f := range files {
+		if got := layoutOf(t, noInline, f.name[1:]); got != disk.LayoutFlatPlain {
+			t.Errorf("WithNoInlineData: %s layout = %d, want flat-plain", f.name, got)
+		}
+	}
+}

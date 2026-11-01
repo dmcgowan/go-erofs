@@ -1071,6 +1071,10 @@ type erofsEntry struct {
 
 	// Data block address for flat-plain files (full-image mode)
 	dataBlkAddr uint32
+	// inlineTail holds the data after the last full block of a flat-inline
+	// regular file larger than a block, read while writing its data blocks
+	// and written with its inode.
+	inlineTail []byte
 }
 
 // --- Internal helpers ---
