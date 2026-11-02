@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -3787,5 +3788,93 @@ func TestCompactInodeEndsImage(t *testing.T) {
 		if err := cw.CopyFrom(efs); err != nil {
 			t.Errorf("n=%d: CopyFrom: %v", n, err)
 		}
+	}
+}
+
+// TestCopyFromReplaceDirWithFile checks that a later CopyFrom replacing a
+// directory with a file drops the directory's contents.
+func TestCopyFromReplaceDirWithFile(t *testing.T) {
+	var buf testBuffer
+	w := erofs.Create(&buf)
+	if err := w.CopyFrom(fstest.MapFS{
+		"d/x":   {Data: []byte("x")},
+		"d/s/y": {Data: []byte("y")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CopyFrom(fstest.MapFS{"d": {Data: []byte("file")}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"/d/x", "/d/s", "/d/s/y"} {
+		if _, err := w.Stat(p); err == nil {
+			t.Errorf("Stat(%s) after /d became a file: got nil error, want an error", p)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	img, err := erofs.Open(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	erofstest.CheckFile(t, img, "d", "file")
+}
+
+// TestCopyFromImageReplaceDirWithFile checks that a MetadataOnly CopyFrom
+// of an image replacing a directory with a file drops the directory's
+// contents.
+func TestCopyFromImageReplaceDirWithFile(t *testing.T) {
+	var src testBuffer
+	sw := erofs.Create(&src)
+	if err := sw.CopyFrom(fstest.MapFS{"d": {Data: []byte("file")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	srcImg, err := erofs.Open(bytes.NewReader(src.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf testBuffer
+	w := erofs.Create(&buf)
+	if err := w.CopyFrom(fstest.MapFS{
+		"d/x":   {Data: []byte("x")},
+		"d/s/y": {Data: []byte("y")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CopyFrom(srcImg, erofs.MetadataOnly()); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"/d/x", "/d/s", "/d/s/y"} {
+		if _, err := w.Stat(p); err == nil {
+			t.Errorf("Stat(%s) after /d became a file: got nil error, want an error", p)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	img, err := erofs.Open(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	if err := fs.WalkDir(img, ".", func(p string, _ fs.DirEntry, err error) error {
+		got = append(got, p)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{".", "d"}; !slices.Equal(got, want) {
+		t.Errorf("entries in image = %q, want %q", got, want)
+	}
+	fi, err := fs.Stat(img, "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.Mode().IsRegular() || fi.Size() != 4 {
+		t.Errorf("Stat(d) = mode %v, size %d; want a regular file of 4 bytes", fi.Mode(), fi.Size())
 	}
 }
