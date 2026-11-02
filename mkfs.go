@@ -1392,12 +1392,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo, hardlinks map[hardlinkKey]*f
 
 	// Handle duplicate paths (overwrite semantics).
 	if existing, ok := fsys.byPath[p]; ok {
-		// Detach the old fsInode before replacing it so that any hard-linked
-		// names that still reference it get a correct nlink.
-		if existing.ino != ino {
-			unlinkInode(existing.ino)
-		}
-		existing.ino = ino
+		fsys.replaceInode(existing, ino)
 		fe = existing
 	} else {
 		fsys.addChild(fe)
@@ -1546,6 +1541,20 @@ func (fsys *Writer) removeSubtree(e *fsEntry) {
 			}
 		}
 	}
+}
+
+// replaceInode points the existing entry e at ino, for a CopyFrom that adds
+// a path already in the tree. The old fsInode is detached so that any
+// hard-linked names still referring to it get a correct nlink, and a
+// directory replaced by a non-directory loses its contents.
+func (fsys *Writer) replaceInode(e *fsEntry, ino *fsInode) {
+	if e.ino != ino {
+		unlinkInode(e.ino)
+	}
+	if e.ino.mode&disk.StatTypeMask == disk.StatTypeDir && ino.mode&disk.StatTypeMask != disk.StatTypeDir {
+		fsys.removeSubtree(e)
+	}
+	e.ino = ino
 }
 
 // unlinkInode decrements the nlink counter of a shared inode when one of its

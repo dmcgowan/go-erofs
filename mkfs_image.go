@@ -317,12 +317,7 @@ func (fsys *Writer) copyFromImage(img *image, hardlinks map[hardlinkKey]*fsInode
 			fsys.root.ino = ino
 		} else if existing, ok := fsys.byPath[cur.path]; ok {
 			// Merge overwrites: replace fsInode but preserve tree linkage.
-			// Detach the old fsInode so any remaining hard-linked names get a
-			// correct nlink.
-			if existing.ino != ino {
-				unlinkInode(existing.ino)
-			}
-			existing.ino = ino
+			fsys.replaceInode(existing, ino)
 		} else {
 			fsys.addChild(fe)
 		}
