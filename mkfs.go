@@ -47,6 +47,8 @@ type Writer struct {
 	noInlineData bool     // from WithNoInlineData
 	cpBuf        []byte   // shared buffer for io.Copy into File
 	padBuf       []byte   // shared zero buffer for padding (block-sized, lazy)
+
+	progress progressCounters // see Writer.Progress
 }
 
 // File is a writable regular file returned by Writer.Create.
@@ -644,6 +646,7 @@ func (fsys *Writer) Close() error {
 		chunkBits:    chunkBits,
 		noInlineData: fsys.noInlineData,
 		zeroBuf:      make([]byte, fsys.blockSize),
+		progress:     &fsys.progress,
 	}
 
 	ew.planLayout(root)
@@ -849,12 +852,14 @@ func (f *File) Write(p []byte) (int, error) {
 		n, err := f.fs.dataFile.Write(p)
 		f.written += int64(n)
 		f.fs.dataOff += int64(n)
+		f.fs.addData(f.entry.ino, int64(n))
 		return n, err
 	}
 
 	n, err := f.fs.spool.Write(p)
 	f.written += int64(n)
 	f.fs.spoolOff += int64(n)
+	f.fs.addData(f.entry.ino, int64(n))
 	return n, err
 }
 
@@ -935,6 +940,8 @@ type fsInode struct {
 	spoolOff     int64
 	dataStartOff int64
 
+	dataBytes int64 // file data taken in; counted in Progress.DataBytes while names > 0
+
 	atime   uint64
 	mtime   uint64
 	size    uint64
@@ -944,6 +951,7 @@ type fsInode struct {
 	mtimeNs uint32
 	nlink   uint32
 	rdev    uint32
+	names   int32 // names in the tree that refer to this inode
 	mode    uint16
 
 	nlinkSet     bool // true if SetNlink was called; suppresses auto-computation
@@ -1053,6 +1061,8 @@ type erofsEntry struct {
 
 	mtime uint64
 	size  uint64
+
+	dataBytes int64 // file data counted in Progress.DataBytes
 
 	// EROFS layout (assigned during planning)
 	nid          uint64
@@ -1446,6 +1456,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo, hardlinks map[hardlinkKey]*f
 			// Spool mode: keep a direct reference to avoid copying.
 			ino.directData = be.Data
 			ino.fileClosed = true
+			fsys.addData(ino, int64(size))
 		}
 	} else {
 		ino.fileClosed = true
@@ -1500,6 +1511,8 @@ func (fsys *Writer) addChild(e *fsEntry) {
 	e.parent = parent
 	parent.children = append(parent.children, e)
 	fsys.byPath[e.path] = e
+	fsys.addName(e.ino)
+	fsys.progress.entries.Add(1)
 }
 
 // remove marks an entry and all its descendants as removed.
@@ -1512,7 +1525,9 @@ func (fsys *Writer) remove(p string) {
 	}
 	e.removed = true
 	delete(fsys.byPath, p)
+	fsys.progress.entries.Add(-1)
 	unlinkInode(e.ino)
+	fsys.dropName(e.ino)
 	if e.ino.mode&disk.StatTypeMask == disk.StatTypeDir {
 		fsys.removeSubtree(e)
 	}
@@ -1535,7 +1550,9 @@ func (fsys *Writer) removeSubtree(e *fsEntry) {
 		if !c.removed {
 			c.removed = true
 			delete(fsys.byPath, c.path)
+			fsys.progress.entries.Add(-1)
 			unlinkInode(c.ino)
+			fsys.dropName(c.ino)
 			if c.ino.mode&disk.StatTypeMask == disk.StatTypeDir {
 				fsys.removeSubtree(c)
 			}
@@ -1550,6 +1567,8 @@ func (fsys *Writer) removeSubtree(e *fsEntry) {
 func (fsys *Writer) replaceInode(e *fsEntry, ino *fsInode) {
 	if e.ino != ino {
 		unlinkInode(e.ino)
+		fsys.dropName(e.ino)
+		fsys.addName(ino)
 	}
 	if e.ino.mode&disk.StatTypeMask == disk.StatTypeDir && ino.mode&disk.StatTypeMask != disk.StatTypeDir {
 		fsys.removeSubtree(e)
@@ -1667,6 +1686,7 @@ func (fsys *Writer) fsToErofs(entry *fsEntry) *erofsEntry {
 		contiguous:    ino.contiguous,
 		metadataOnly:  ino.metadataOnly,
 		data:          data,
+		dataBytes:     ino.dataBytes,
 		xattrs:        ino.xattrs,
 		erofsFileType: modeToFileType(ino.mode),
 	}
