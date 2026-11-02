@@ -1384,6 +1384,10 @@ func (fsys *Writer) add(p string, info fs.FileInfo, hardlinks map[hardlinkKey]*f
 		if existing.ino != ino {
 			unlinkInode(existing.ino)
 		}
+		// A directory replaced by a non-directory loses its contents.
+		if existing.ino.mode&disk.StatTypeMask == disk.StatTypeDir && typ != disk.StatTypeDir {
+			fsys.removeSubtree(existing)
+		}
 		existing.ino = ino
 		fe = existing
 	} else {
