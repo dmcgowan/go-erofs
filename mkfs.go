@@ -918,32 +918,37 @@ func (f *File) Chown(uid, gid int) error {
 // fsEntry values. No fsEntry is "primary" — any surviving name can own the
 // on-disk inode during serialization.
 type fsInode struct {
-	mode     uint16
-	uid      uint32
-	gid      uint32
-	atime    uint64
-	atimeNs  uint32
-	mtime    uint64
-	mtimeNs  uint32
-	nlink    uint32
-	nlinkSet bool // true if SetNlink was called; suppresses auto-computation
-	size     uint64
-	rdev     uint32
-	xattrs   map[string]string
+	// Fields are ordered by size to avoid padding, as one fsInode is
+	// allocated per inode.
+
+	directData io.Reader // non-nil when data is referenced directly (no spool copy)
+
+	xattrs map[string]string
 
 	// Symlink target (empty for non-symlinks).
 	linkTarget string
 
 	// Chunk-based layout (metadata-only mode).
-	chunks     []builder.Chunk
-	contiguous bool
+	chunks []builder.Chunk
 
 	// Data location in spool or external data file.
 	spoolOff     int64
 	dataStartOff int64
-	fileClosed   bool      // true after File.Close()
-	directData   io.Reader // non-nil when data is referenced directly (no spool copy)
 
+	atime   uint64
+	mtime   uint64
+	size    uint64
+	uid     uint32
+	gid     uint32
+	atimeNs uint32
+	mtimeNs uint32
+	nlink   uint32
+	rdev    uint32
+	mode    uint16
+
+	nlinkSet     bool // true if SetNlink was called; suppresses auto-computation
+	contiguous   bool // data blocks are contiguous; use large chunk size
+	fileClosed   bool // true after File.Close()
 	metadataOnly bool // chunk-based layout even when chunks is nil
 }
 
@@ -1025,25 +1030,8 @@ type dataRanger interface {
 
 // erofsEntry is the internal representation of a file/dir/symlink used by the builder.
 type erofsEntry struct {
-	mode    uint16
-	uid     uint32
-	gid     uint32
-	mtime   uint64
-	mtimeNs uint32
-	nlink   uint32
-	size    uint64
-	rdev    uint32
-
-	name      string
-	path      string
-	children  []*erofsEntry
-	symTarget string
-
-	// For regular files — metadata-only mode
-	chunks       []builder.Chunk
-	contiguous   bool  // data blocks are contiguous; use large chunk size
-	chunkBits    uint8 // per-entry chunk bits (0 = use global)
-	metadataOnly bool  // chunk-based layout even without chunks
+	// Fields are ordered by size to avoid padding, as one erofsEntry is
+	// allocated per entry.
 
 	// For regular files — full-image mode
 	data io.Reader
@@ -1055,18 +1043,43 @@ type erofsEntry struct {
 	// The primary entry gets an on-disk inode; secondary entries borrow its NID.
 	hardLinkPrimary *erofsEntry
 
+	name      string
+	path      string
+	symTarget string
+	children  []*erofsEntry
+
+	// For regular files — metadata-only mode
+	chunks []builder.Chunk
+
+	mtime uint64
+	size  uint64
+
 	// EROFS layout (assigned during planning)
-	nid           uint64
-	parentNid     uint64
-	erofsFileType uint8
-	layout        uint8
-	compact       bool // true = 32-byte compact inode; false = 64-byte extended
-	xattrSize     int  // bytes of xattr area (0 if no xattrs)
-	chunkPad      int  // 8-byte alignment pad between xattr area and chunk-index map
-	trailingSize  int
+	nid          uint64
+	parentNid    uint64
+	xattrSize    int // bytes of xattr area (0 if no xattrs)
+	chunkPad     int // 8-byte alignment pad between xattr area and chunk-index map
+	trailingSize int
+
+	uid     uint32
+	gid     uint32
+	mtimeNs uint32
+	nlink   uint32
+	rdev    uint32
 
 	// Data block address for flat-plain files (full-image mode)
 	dataBlkAddr uint32
+
+	mode uint16
+
+	contiguous    bool  // data blocks are contiguous; use large chunk size
+	chunkBits     uint8 // per-entry chunk bits (0 = use global)
+	metadataOnly  bool  // chunk-based layout even without chunks
+	erofsFileType uint8
+
+	// EROFS layout (assigned during planning)
+	layout  uint8
+	compact bool // true = 32-byte compact inode; false = 64-byte extended
 }
 
 // --- Internal helpers ---
