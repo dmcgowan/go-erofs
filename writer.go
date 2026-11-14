@@ -58,8 +58,10 @@ func (w *erofsWriter) entryChunkBits(e *erofsEntry) uint8 {
 }
 
 // entryChunkSize returns the chunk size in bytes for a specific entry.
-func (w *erofsWriter) entryChunkSize(e *erofsEntry) int {
-	return w.blockSize << w.entryChunkBits(e)
+// It is 64-bit because a contiguous entry's chunk can exceed the int range
+// on 32-bit platforms.
+func (w *erofsWriter) entryChunkSize(e *erofsEntry) uint64 {
+	return uint64(w.blockSize) << w.entryChunkBits(e)
 }
 
 // minChunkBits returns the minimum chunkBits such that file size fits in
@@ -251,7 +253,7 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 		devtSlotOff = uint16(disk.SizeSuperBlock / 16)
 	}
 	for _, e := range w.entries {
-		if len(e.chunks) > 0 {
+		if e.layout == disk.LayoutChunkBased {
 			featureIncompat |= disk.FeatureIncompatChunkedFile
 			break
 		}
@@ -505,8 +507,8 @@ func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
 // Each index entry covers one logical chunk (chunkSize bytes).
 func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 	cs := w.entryChunkSize(e)
-	blocksPerChunk := cs / w.blockSize
-	nchunks := (int(e.size) + cs - 1) / cs
+	blocksPerChunk := uint64(1) << w.entryChunkBits(e)
+	nchunks := int((e.size + cs - 1) / cs)
 
 	// Null chunk index (no mapping): StartBlkHi=0xFFFF, DeviceID=0, StartBlkLo=NullAddr.
 	var nullIdx [disk.SizeChunkIndex]byte
@@ -519,8 +521,8 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 		// A chunk with PhysicalBlock == builder.NullPhysicalBlock is a hole:
 		// emit nullIdx entries for its block span.
 		var scratch [disk.SizeChunkIndex]byte
-		ci := 0   // index into source chunks
-		coff := 0 // block offset within current source chunk
+		ci := 0           // index into source chunks
+		coff := uint64(0) // block offset within current source chunk
 		for n := 0; n < nchunks; n++ {
 			if ci >= len(e.chunks) {
 				if _, err := buf.Write(nullIdx[:]); err != nil {
@@ -535,7 +537,7 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 					return err
 				}
 			} else {
-				phys := c.PhysicalBlock + uint64(coff)
+				phys := c.PhysicalBlock + coff
 				binary.LittleEndian.PutUint16(scratch[0:2], uint16(phys>>32))
 				binary.LittleEndian.PutUint16(scratch[2:4], c.DeviceID)
 				binary.LittleEndian.PutUint32(scratch[4:8], uint32(phys))
@@ -544,8 +546,8 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 				}
 			}
 			coff += blocksPerChunk
-			for ci < len(e.chunks) && coff >= int(e.chunks[ci].Count) {
-				coff -= int(e.chunks[ci].Count)
+			for ci < len(e.chunks) && coff >= uint64(e.chunks[ci].Count) {
+				coff -= uint64(e.chunks[ci].Count)
 				ci++
 			}
 		}

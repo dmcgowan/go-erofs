@@ -259,24 +259,17 @@ func (fsys *Writer) CreateHole(name string, size int64) error {
 		return err
 	}
 
-	// A single hole range spanning the whole file; chunksFromRanges splits it
-	// into the null chunks planLayout expects, at the same chunk size the layout
-	// pass sizes the chunk index with.
-	var chunks []builder.Chunk
-	if size > 0 {
-		c, err := fsys.chunksFromRanges([]DataRange{{Offset: holeOffset, Size: size}}, size)
-		if err != nil {
-			return fmt.Errorf("mkfs: hole chunks for %q: %w", name, err)
-		}
-		chunks = c
-	}
-
+	// No chunks are recorded: a chunk-based inode without chunks is written
+	// with null chunk indexes, sized once the block size is final. Marking it
+	// contiguous lets layout pick the smallest chunk size covering the whole
+	// file, so the hole takes a single index rather than one per block.
 	fsys.ensureParent(name)
 	fsys.addChild(&fsEntry{path: name, ino: &fsInode{
-		mode:       disk.StatTypeReg | 0o644,
-		size:       uint64(size),
-		chunks:     chunks,
-		fileClosed: true,
+		mode:         disk.StatTypeReg | 0o644,
+		size:         uint64(size),
+		metadataOnly: size > 0,
+		contiguous:   size > 0,
+		fileClosed:   true,
 	}})
 	return nil
 }
@@ -741,9 +734,14 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 			return nil, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("file not yet closed for writing")}
 		}
 		var sr *io.SectionReader
-		if fsys.dataFile != nil {
+		switch {
+		case ino.metadataOnly && len(ino.chunks) == 0:
+			// A hole has no data in the spool or data file; it reads as
+			// zeros, the same as it does from the written image.
+			sr = io.NewSectionReader(zeroReaderAt{}, 0, int64(ino.size))
+		case fsys.dataFile != nil:
 			sr = io.NewSectionReader(fsys.dataFile, ino.dataStartOff, int64(ino.size))
-		} else if fsys.spool != nil && ino.size > 0 {
+		case fsys.spool != nil && ino.size > 0:
 			sr = io.NewSectionReader(fsys.spool, ino.dataStartOff, int64(ino.size))
 		}
 		return &readFile{entry: entry, reader: sr}, nil
@@ -1249,6 +1247,14 @@ func entryNlink(e *fsEntry) uint32 {
 		return 2 + childDirs
 	}
 	return inodeNlink(e.ino)
+}
+
+// zeroReaderAt is an io.ReaderAt that reads zeros at every offset.
+type zeroReaderAt struct{}
+
+func (zeroReaderAt) ReadAt(p []byte, _ int64) (int, error) {
+	clear(p)
+	return len(p), nil
 }
 
 // readFile implements fs.File for reading back a finalized file's data.

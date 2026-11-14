@@ -183,7 +183,7 @@ func (w *erofsWriter) calcTrailingSize(e *erofsEntry) int {
 				return 0
 			}
 			cs := w.entryChunkSize(e)
-			nchunks := (int(e.size) + cs - 1) / cs
+			nchunks := int((e.size + cs - 1) / cs)
 			return nchunks * disk.SizeChunkIndex
 		}
 		if e.layout == disk.LayoutFlatInline {
